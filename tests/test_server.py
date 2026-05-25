@@ -9,6 +9,7 @@ from gateway.load_tracker import LoadTracker
 from gateway.metrics import MetricsCollector
 from gateway.radix_tree import RadixTree
 from gateway.router import Router
+from gateway.tenancy import RateLimiter, TenantRegistry
 from mock_backend.app import create_app
 
 
@@ -27,12 +28,17 @@ class DeadTransport(httpx.AsyncBaseTransport):
 
 def _wire(backends_str, transport):
     gw.cfg.backends = backends_str
+    gw.cfg.rate_limit_enabled = False          # reset tenancy knobs to a known default
+    gw.cfg.tenants = ""
+    gw.cfg.prefix_isolation = "tenant"
     gw.registry = BackendRegistry(gw.cfg)
     gw.tree = RadixTree(gw.cfg.backend_cache_blocks)
     gw.load = LoadTracker()
     gw.router = Router(gw.cfg, gw.tree, gw.load)
     gw.metrics = MetricsCollector()
     gw.breaker = CircuitBreaker(gw.cfg.circuit_fail_threshold, gw.cfg.circuit_cooldown_s)
+    gw.tenants = TenantRegistry(gw.cfg.tenants)
+    gw.limiter = RateLimiter()
     gw.app.state.client = httpx.AsyncClient(transport=transport)
 
 
@@ -61,6 +67,17 @@ async def _post_hit(client):
         async for chunk in resp.aiter_raw():
             body += chunk
         return resp, hit, body
+
+
+async def _post_as(client, authorization):
+    async with client.stream("POST", "/v1/chat/completions",
+                             json={"model": "mock-model", "messages": _msgs()},
+                             headers={"x-routing-strategy": "prefix_tree",
+                                      "authorization": authorization}) as resp:
+        hit = resp.headers.get("x-prefix-cache-hit")
+        async for _ in resp.aiter_raw():
+            pass
+        return resp, hit
 
 
 # --- streaming + header propagation ---
@@ -154,5 +171,48 @@ def test_failover_to_healthy_backend():
             assert resp.headers.get("x-gw-backend") == "alive"
             assert b"[DONE]" in body
         assert "gateway_retries_total" in gw.metrics.render()   # a failover happened
+        await gw.app.state.client.aclose()
+    asyncio.run(run())
+
+
+# --- multi-tenancy: over-quota -> 429 with rate-limit headers ---
+
+def test_rate_limit_returns_429_with_headers():
+    async def run():
+        _single_backend()
+        gw.cfg.rate_limit_enabled = True
+        gw.cfg.tenants = "sk-test=t:bronze"          # bronze: rps=5
+        gw.tenants = TenantRegistry(gw.cfg.tenants)
+        gw.limiter = RateLimiter()
+        async with _gwclient() as c:
+            hdr = {"authorization": "Bearer sk-test"}
+            resps = []
+            for _ in range(10):                       # exceed the rps burst
+                resps.append(await c.post(
+                    "/v1/chat/completions",
+                    json={"model": "mock-model", "messages": _msgs(), "max_tokens": 8},
+                    headers=hdr))
+            throttled = [r for r in resps if r.status_code == 429]
+            assert throttled, [r.status_code for r in resps]
+            assert "Retry-After" in throttled[0].headers
+            assert "X-RateLimit-Limit-Requests" in throttled[0].headers
+        await gw.app.state.client.aclose()
+    asyncio.run(run())
+
+
+# --- multi-tenancy: per-tenant prefix isolation (no cross-tenant cache reuse) ---
+
+def test_prefix_isolation_between_tenants():
+    async def run():
+        _single_backend()
+        gw.cfg.tenants = "sk-a=ta:gold,sk-b=tb:gold"
+        gw.tenants = TenantRegistry(gw.cfg.tenants)
+        async with _gwclient() as c:
+            _, a1 = await _post_as(c, "Bearer sk-a")   # tenant A cold -> miss
+            _, a2 = await _post_as(c, "Bearer sk-a")   # tenant A repeat -> hit
+            _, b1 = await _post_as(c, "Bearer sk-b")   # tenant B, same prompt -> isolated miss
+        assert a1 == "false"
+        assert a2 == "true"
+        assert b1 == "false"
         await gw.app.state.client.aclose()
     asyncio.run(run())

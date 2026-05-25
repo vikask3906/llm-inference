@@ -36,9 +36,10 @@ class Router:
     def _candidates(self, backends: list[str]) -> list[str]:
         return backends
 
-    def choose(self, prompt: str, backends: list[str], strategy: str | None = None) -> RouteResult:
+    def choose(self, prompt: str, backends: list[str], strategy: str | None = None,
+               seed: int = 0) -> RouteResult:
         strategy = strategy or self.cfg.strategy
-        hashes = block_hashes(prompt, self.cfg.block_chars, self.cfg.hash_cutoff_blocks)
+        hashes = block_hashes(prompt, self.cfg.block_chars, self.cfg.hash_cutoff_blocks, seed=seed)
         tokens = len(hashes) * self.cfg.block_tokens
         cands = self._candidates(backends)
 

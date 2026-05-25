@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from gateway.config import Config
-from gateway.hashing import block_hashes
+from gateway.hashing import block_hashes, stable_seed
 
 CFG = Config()
 
@@ -54,7 +54,10 @@ def create_app(node_id: str = "mock", cap_blocks: int = 600,
         body = await request.json()
         prompt = "\n".join(f"{m.get('role', '')}: {m.get('content', '')}"
                            for m in body.get("messages", []))
-        hashes = block_hashes(prompt, CFG.block_chars, CFG.hash_cutoff_blocks)
+        # cache_salt namespaces the prefix cache per tenant (vLLM-style isolation)
+        salt = body.get("cache_salt")
+        seed = stable_seed(salt) if salt else 0
+        hashes = block_hashes(prompt, CFG.block_chars, CFG.hash_cutoff_blocks, seed=seed)
         total = len(hashes)
         hit_blocks = process(hashes)
         uncached = max(0, total - hit_blocks)

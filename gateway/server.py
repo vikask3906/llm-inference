@@ -12,6 +12,7 @@ predictable sub-2ms added latency; the control loop stays in Python.
 
 import asyncio
 import contextlib
+import math
 import time
 from contextlib import asynccontextmanager
 
@@ -26,6 +27,7 @@ from .load_tracker import LoadTracker
 from .metrics import BLOCK_BUCKETS, MetricsCollector
 from .radix_tree import RadixTree
 from .router import Router
+from .tenancy import RateLimiter, TenantRegistry, tenant_seed
 
 cfg = Config.from_env()
 registry = BackendRegistry(cfg)
@@ -34,10 +36,28 @@ load = LoadTracker()
 router = Router(cfg, tree, load)
 metrics = MetricsCollector()
 breaker = CircuitBreaker(cfg.circuit_fail_threshold, cfg.circuit_cooldown_s)
+tenants = TenantRegistry(cfg.tenants)
+limiter = RateLimiter()
 
 
 def extract_prompt(messages: list[dict]) -> str:
     return "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in messages)
+
+
+def estimate_prompt_tokens(prompt: str) -> int:
+    return max(1, len(prompt) // cfg.chars_per_token)
+
+
+def ratelimit_headers(tenant, adm) -> dict[str, str]:
+    h = {
+        "X-RateLimit-Limit-Requests": str(int(tenant.rps)),
+        "X-RateLimit-Limit-Tokens": str(int(tenant.tps)),
+        "X-RateLimit-Remaining-Requests": str(max(0, int(adm.remaining_rps))),
+        "X-RateLimit-Remaining-Tokens": str(max(0, int(adm.remaining_tps))),
+    }
+    if adm.retry_after and adm.retry_after != float("inf"):
+        h["Retry-After"] = str(max(1, math.ceil(adm.retry_after)))
+    return h
 
 
 async def scrape_loop(client: httpx.AsyncClient) -> None:
@@ -90,6 +110,9 @@ async def metrics_endpoint():
                           help="Reconciled KV-cache usage (0..1)", backend=b.id)
         metrics.set_gauge("gateway_circuit_state", breaker.state_code(b.id),
                           help="Circuit state (0 closed, 1 half_open, 2 open)", backend=b.id)
+    for tid, n in list(limiter.inflight.items()):
+        metrics.set_gauge("gateway_tenant_inflight", n,
+                          help="In-flight requests per tenant", tenant=tid)
     return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
 
@@ -101,11 +124,45 @@ async def chat_completions(request: Request):
     strategy = request.headers.get("x-routing-strategy")
 
     eff_strategy = strategy or cfg.strategy
+
+    # --- tenant identification + admission control (before routing) ---
+    tenant = tenants.resolve(request.headers)
+    metrics.inc_counter("gateway_tenant_requests_total", help="Requests per tenant",
+                        tenant=tenant.id)
+    input_tokens = estimate_prompt_tokens(prompt)
+    reserved_output = min(int(body.get("max_tokens") or cfg.default_output_tokens),
+                          cfg.max_output_tokens)
+    est_cost = input_tokens + reserved_output
+
+    if cfg.rate_limit_enabled:
+        adm = limiter.admit(tenant, est_cost)
+        if not adm.allowed:
+            metrics.inc_counter("gateway_tenant_throttled_total",
+                                help="Rate-limited requests per tenant",
+                                tenant=tenant.id, reason=adm.reason)
+            return JSONResponse(
+                {"error": {"message": f"rate limit exceeded ({adm.reason})",
+                           "type": "rate_limit_exceeded"}},
+                status_code=429, headers=ratelimit_headers(tenant, adm))
+
+    def release(actual_output: int) -> None:
+        if cfg.rate_limit_enabled:
+            limiter.release(tenant, reserved_output, actual_output)
+
     ids = registry.ids_for(model)
     if not ids:
+        release(0)
         metrics.inc_counter("gateway_errors_total", help="Gateway-side errors", code="503")
         return JSONResponse({"error": f"no healthy backend for model {model!r}"},
                             status_code=503)
+
+    # Per-tenant prefix isolation: seed the gateway's routing hashes AND tell the
+    # backend to salt its own KV cache (vLLM `cache_salt`), so tenants neither
+    # share nor leak (via TTFT) each other's cache. "global" keeps caches shared.
+    seed = 0
+    if cfg.prefix_isolation == "tenant":
+        seed = tenant_seed(tenant.id)
+        body["cache_salt"] = tenant.id
 
     # Exclude backends with an open circuit. If every circuit is open, degrade to
     # trying all of them (better to attempt than to hard-fail).
@@ -122,7 +179,7 @@ async def chat_completions(request: Request):
         if not remaining:
             break
         t0 = time.perf_counter()
-        r = router.choose(prompt, remaining, strategy=strategy)
+        r = router.choose(prompt, remaining, strategy=strategy, seed=seed)
         if not routing_recorded:
             metrics.observe("gateway_routing_seconds", time.perf_counter() - t0,
                             help="Time spent in the routing decision (gateway added latency)")
@@ -145,12 +202,15 @@ async def chat_completions(request: Request):
             upstream = None
 
     if upstream is None:
+        release(0)
         metrics.inc_counter("gateway_errors_total", help="Gateway-side errors", code="502")
         return JSONResponse({"error": "all candidate backends unreachable"}, status_code=502)
 
     breaker.record_success(r.backend_id)
     metrics.inc_counter("gateway_requests_total", help="Total routed requests",
                         strategy=eff_strategy, backend=r.backend_id)
+    metrics.inc_counter("gateway_tenant_tokens_total", value=input_tokens,
+                        help="Input tokens accounted per tenant", tenant=tenant.id)
     metrics.observe("gateway_prefix_match_blocks", r.match_blocks, buckets=BLOCK_BUCKETS,
                     help="Prefix blocks reused (cache affinity) per request")
 
@@ -164,12 +224,16 @@ async def chat_completions(request: Request):
     final_r, final_cm = r, cm
 
     async def body_iter():
+        out_events = 0
         try:
             async for chunk in upstream.aiter_raw():
+                out_events += chunk.count(b"data:")
                 yield chunk
         finally:
             await final_cm.__aexit__(None, None, None)
             load.on_complete(final_r.backend_id, final_r.tokens)
+            # reconcile TPS: actual streamed tokens vs the reserved estimate
+            release(max(0, out_events - 1))            # minus the [DONE] event
 
     return StreamingResponse(
         body_iter(),
