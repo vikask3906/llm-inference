@@ -22,3 +22,6 @@ env/
 .idea/
 .vscode/
 .DS_Store
+
+# Claude Code local config (machine-local, not for the repo)
+.claude/settings.local.json
