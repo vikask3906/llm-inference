@@ -13,12 +13,14 @@ predictable sub-2ms added latency; the control loop stays in Python.
 import asyncio
 import contextlib
 import math
+import os
 import time
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from opentelemetry.trace import Status, StatusCode
 
 from .backends import BackendRegistry
 from .circuit import CircuitBreaker
@@ -28,6 +30,7 @@ from .metrics import BLOCK_BUCKETS, MetricsCollector
 from .radix_tree import RadixTree
 from .router import Router
 from .tenancy import RateLimiter, TenantRegistry, tenant_seed
+from .tracing import get_tracer, setup_tracing
 
 cfg = Config.from_env()
 registry = BackendRegistry(cfg)
@@ -38,6 +41,16 @@ metrics = MetricsCollector()
 breaker = CircuitBreaker(cfg.circuit_fail_threshold, cfg.circuit_cooldown_s)
 tenants = TenantRegistry(cfg.tenants)
 limiter = RateLimiter()
+
+# Tracing is a no-op unless an exporter is configured (OTLP endpoint, or the
+# in-memory exporter in tests), so it costs nothing in an unconfigured deploy.
+if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        setup_tracing(OTLPSpanExporter())
+    except Exception:
+        pass
+tracer = get_tracer()
 
 
 def extract_prompt(messages: list[dict]) -> str:
@@ -129,6 +142,12 @@ async def chat_completions(request: Request):
     tenant = tenants.resolve(request.headers)
     metrics.inc_counter("gateway_tenant_requests_total", help="Requests per tenant",
                         tenant=tenant.id)
+
+    span = tracer.start_span("chat.completion")
+    span.set_attribute("llm.model", str(model))
+    span.set_attribute("routing.strategy", eff_strategy)
+    span.set_attribute("tenant.id", tenant.id)
+
     input_tokens = estimate_prompt_tokens(prompt)
     reserved_output = min(int(body.get("max_tokens") or cfg.default_output_tokens),
                           cfg.max_output_tokens)
@@ -140,6 +159,10 @@ async def chat_completions(request: Request):
             metrics.inc_counter("gateway_tenant_throttled_total",
                                 help="Rate-limited requests per tenant",
                                 tenant=tenant.id, reason=adm.reason)
+            span.set_attribute("http.status_code", 429)
+            span.set_attribute("ratelimit.reason", adm.reason or "")
+            span.set_status(Status(StatusCode.ERROR, "rate_limited"))
+            span.end()
             return JSONResponse(
                 {"error": {"message": f"rate limit exceeded ({adm.reason})",
                            "type": "rate_limit_exceeded"}},
@@ -153,6 +176,9 @@ async def chat_completions(request: Request):
     if not ids:
         release(0)
         metrics.inc_counter("gateway_errors_total", help="Gateway-side errors", code="503")
+        span.set_attribute("http.status_code", 503)
+        span.set_status(Status(StatusCode.ERROR, "no_backend"))
+        span.end()
         return JSONResponse({"error": f"no healthy backend for model {model!r}"},
                             status_code=503)
 
@@ -171,6 +197,7 @@ async def chat_completions(request: Request):
     client: httpx.AsyncClient = request.app.state.client
     r = cm = upstream = None
     routing_recorded = False
+    retries = 0
 
     # Failover loop: re-route optimally on the shrinking candidate set. This is
     # safe ONLY before the first byte; once streaming starts, retrying would
@@ -197,6 +224,7 @@ async def chat_completions(request: Request):
             breaker.record_failure(r.backend_id)
             registry.set_health(r.backend_id, False)
             remaining.remove(r.backend_id)
+            retries += 1
             metrics.inc_counter("gateway_retries_total",
                                 help="Failover attempts after a backend connect failure")
             upstream = None
@@ -204,6 +232,10 @@ async def chat_completions(request: Request):
     if upstream is None:
         release(0)
         metrics.inc_counter("gateway_errors_total", help="Gateway-side errors", code="502")
+        span.set_attribute("http.status_code", 502)
+        span.set_attribute("routing.retries", retries)
+        span.set_status(Status(StatusCode.ERROR, "unreachable"))
+        span.end()
         return JSONResponse({"error": "all candidate backends unreachable"}, status_code=502)
 
     breaker.record_success(r.backend_id)
@@ -221,6 +253,13 @@ async def chat_completions(request: Request):
         metric = "gateway_cache_hits_total" if cache_hit == "true" else "gateway_cache_misses_total"
         metrics.inc_counter(metric, help="Backend prefix-cache outcomes", backend=r.backend_id)
 
+    span.set_attribute("routing.backend", r.backend_id)
+    span.set_attribute("routing.match_blocks", r.match_blocks)
+    span.set_attribute("routing.retries", retries)
+    span.set_attribute("http.status_code", upstream.status_code)
+    if cache_hit is not None:
+        span.set_attribute("cache.hit", cache_hit == "true")
+
     final_r, final_cm = r, cm
 
     async def body_iter():
@@ -233,7 +272,11 @@ async def chat_completions(request: Request):
             await final_cm.__aexit__(None, None, None)
             load.on_complete(final_r.backend_id, final_r.tokens)
             # reconcile TPS: actual streamed tokens vs the reserved estimate
-            release(max(0, out_events - 1))            # minus the [DONE] event
+            actual_output = max(0, out_events - 1)     # minus the [DONE] event
+            release(actual_output)
+            span.set_attribute("output.tokens", actual_output)
+            span.set_status(Status(StatusCode.OK))
+            span.end()
 
     return StreamingResponse(
         body_iter(),
