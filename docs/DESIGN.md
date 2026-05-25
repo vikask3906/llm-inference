@@ -121,9 +121,18 @@ processed). Then:
 > `match[B]` = the deepest matched-path node where `B ∈ holders` — found in a
 > single O(matched_depth) downward walk for *all* candidates at once.
 
-A **plain trie** (one node/block) is the MVP; **path compression** is a Phase-2
-memory optimization. A flat `prefix→backend` hash (the consistent-hash baseline)
-*cannot* express longest-prefix match — that's why it loses.
+The tree is **path-compressed** (radix/PATRICIA): a chain of single-child blocks
+is one edge carrying a run of hashes, so node count collapses to O(branch points)
+while memory stays O(unique blocks); a divergent insert splits an edge. A flat
+`prefix→backend` hash (the consistent-hash baseline) *cannot* express
+longest-prefix match — that's why it loses.
+
+**Tie-break / load spread.** Among backends whose est-TTFT is within hysteresis
+of the best, the router spreads by least-load + round-robin, so a tiny shared
+prefix (e.g. a common system prompt) doesn't pin all traffic to one node, while a
+large real affinity still keeps a single backend the sole winner. Dispatch state
+(tree belief + in-flight) is recorded *before* connecting, so concurrent requests
+for the same prefix converge instead of duplicating cache.
 
 ### 5.3 Eviction model
 The tree is an **approximation** of what each backend *still* holds (backends
@@ -263,7 +272,7 @@ Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
   metrics); next: OpenTelemetry/Jaeger tracing + Grafana dashboard (TTFT + hit
   rate vs NGINX round-robin) and Prometheus-format scraping of backends.
 - **Rust** hot-path rewrite with profiled latency/throughput before/after.
-- **Path compression** + COW/epoch reclamation in the tree.
+- COW/epoch reclamation in the tree (path compression is implemented ✓).
 - **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its
   place) or a deterministic shared hash ring to keep prefix routing consistent.
 - **Heterogeneous fleet:** route by model first, then affinity+load.

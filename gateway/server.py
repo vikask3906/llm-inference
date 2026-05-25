@@ -127,11 +127,16 @@ async def chat_completions(request: Request):
             metrics.observe("gateway_routing_seconds", time.perf_counter() - t0,
                             help="Time spent in the routing decision (gateway added latency)")
             routing_recorded = True
+        # Reflect the decision in shared state BEFORE connecting, so concurrent
+        # requests for the same prefix converge instead of duplicating cache.
+        tree.insert(r.hashes, r.backend_id)
+        load.on_dispatch(r.backend_id, r.tokens)
         cm = client.stream("POST", f"{registry.url(r.backend_id)}/v1/chat/completions", json=body)
         try:
             upstream = await cm.__aenter__()
             break
         except Exception:
+            load.on_complete(r.backend_id, r.tokens)   # undo dispatch; tree belief is harmless
             breaker.record_failure(r.backend_id)
             registry.set_health(r.backend_id, False)
             remaining.remove(r.backend_id)
@@ -148,8 +153,6 @@ async def chat_completions(request: Request):
                         strategy=eff_strategy, backend=r.backend_id)
     metrics.observe("gateway_prefix_match_blocks", r.match_blocks, buckets=BLOCK_BUCKETS,
                     help="Prefix blocks reused (cache affinity) per request")
-    tree.insert(r.hashes, r.backend_id)          # commit belief
-    load.on_dispatch(r.backend_id, r.tokens)
 
     headers = {"x-gw-backend": r.backend_id, "x-gw-match-blocks": str(r.match_blocks)}
     cache_hit = upstream.headers.get("x-prefix-cache-hit")

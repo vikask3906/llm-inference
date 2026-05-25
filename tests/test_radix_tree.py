@@ -36,12 +36,31 @@ def test_multiple_backends_same_prefix():
     assert t.match([1, 2]) == {"b1": 2, "b2": 2}
 
 
-def test_front_eviction_breaks_contiguity():
-    t = RadixTree(backend_cache_blocks=2)   # cap forces eviction of the front node
+def test_oversized_prefix_is_evicted():
+    t = RadixTree(backend_cache_blocks=2)    # a single 3-block node exceeds the cap
     t.insert([1, 2, 3], "b1")
-    assert t.held_blocks("b1") == 2          # bounded to cap
-    # front block evicted -> KV prefix is cold -> no contiguous match
-    assert t.match([1, 2, 3]) == {}
+    assert t.held_blocks("b1") == 0          # node-granular eviction drops the whole segment
+    assert t.match([1, 2, 3]) == {}          # prefix is now cold
+
+
+def test_lru_evicts_least_recently_used_prefix():
+    t = RadixTree(backend_cache_blocks=4)    # holds two 2-block prefixes
+    t.insert([1, 2], "b1")
+    t.insert([3, 4], "b1")                    # at cap (4 blocks)
+    t.insert([1, 2], "b1")                    # touch [1,2] -> most recently used
+    t.insert([5, 6], "b1")                    # over cap -> evict LRU ([3,4])
+    assert t.match([1, 2]) == {"b1": 2}
+    assert t.match([5, 6]) == {"b1": 2}
+    assert t.match([3, 4]) == {}             # evicted
+
+
+def test_edge_split_on_divergent_insert():
+    t = RadixTree(100)
+    t.insert([1, 2, 3, 4], "b1")
+    t.insert([1, 2, 9], "b2")                # diverges after [1,2] -> splits the edge
+    assert t.match([1, 2, 3, 4]) == {"b1": 4, "b2": 2}
+    assert t.match([1, 2, 9]) == {"b2": 3, "b1": 2}
+    assert t.match([1, 2]) == {"b1": 2, "b2": 2}
 
 
 def test_remove_backend_membership_eviction():
