@@ -15,6 +15,7 @@ import contextlib
 import math
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import httpx
@@ -26,6 +27,7 @@ from .backends import BackendRegistry
 from .circuit import CircuitBreaker
 from .config import Config
 from .load_tracker import LoadTracker
+from .logging_setup import configure_logging, log_event
 from .metrics import BLOCK_BUCKETS, MetricsCollector
 from .radix_tree import RadixTree
 from .router import Router
@@ -41,6 +43,12 @@ metrics = MetricsCollector()
 breaker = CircuitBreaker(cfg.circuit_fail_threshold, cfg.circuit_cooldown_s)
 tenants = TenantRegistry(cfg.tenants)
 limiter = RateLimiter()
+log = configure_logging(cfg.log_level)
+
+
+def _trace_id(span) -> str | None:
+    tid = span.get_span_context().trace_id
+    return format(tid, "032x") if tid else None
 
 # Tracing is a no-op unless an exporter is configured (OTLP endpoint, or the
 # in-memory exporter in tests), so it costs nothing in an unconfigured deploy.
@@ -143,7 +151,10 @@ async def chat_completions(request: Request):
     metrics.inc_counter("gateway_tenant_requests_total", help="Requests per tenant",
                         tenant=tenant.id)
 
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    t_request = time.perf_counter()
     span = tracer.start_span("chat.completion")
+    span.set_attribute("request.id", request_id)
     span.set_attribute("llm.model", str(model))
     span.set_attribute("routing.strategy", eff_strategy)
     span.set_attribute("tenant.id", tenant.id)
@@ -163,10 +174,15 @@ async def chat_completions(request: Request):
             span.set_attribute("ratelimit.reason", adm.reason or "")
             span.set_status(Status(StatusCode.ERROR, "rate_limited"))
             span.end()
+            rl_headers = ratelimit_headers(tenant, adm)
+            rl_headers["x-request-id"] = request_id
+            log_event(log, "request", request_id=request_id, trace_id=_trace_id(span),
+                      tenant=tenant.id, model=str(model), status=429, reason=adm.reason,
+                      duration_ms=round((time.perf_counter() - t_request) * 1000, 2))
             return JSONResponse(
                 {"error": {"message": f"rate limit exceeded ({adm.reason})",
                            "type": "rate_limit_exceeded"}},
-                status_code=429, headers=ratelimit_headers(tenant, adm))
+                status_code=429, headers=rl_headers)
 
     def release(actual_output: int) -> None:
         if cfg.rate_limit_enabled:
@@ -179,8 +195,11 @@ async def chat_completions(request: Request):
         span.set_attribute("http.status_code", 503)
         span.set_status(Status(StatusCode.ERROR, "no_backend"))
         span.end()
+        log_event(log, "request", request_id=request_id, trace_id=_trace_id(span),
+                  tenant=tenant.id, model=str(model), status=503,
+                  duration_ms=round((time.perf_counter() - t_request) * 1000, 2))
         return JSONResponse({"error": f"no healthy backend for model {model!r}"},
-                            status_code=503)
+                            status_code=503, headers={"x-request-id": request_id})
 
     # Per-tenant prefix isolation: seed the gateway's routing hashes AND tell the
     # backend to salt its own KV cache (vLLM `cache_salt`), so tenants neither
@@ -236,7 +255,11 @@ async def chat_completions(request: Request):
         span.set_attribute("routing.retries", retries)
         span.set_status(Status(StatusCode.ERROR, "unreachable"))
         span.end()
-        return JSONResponse({"error": "all candidate backends unreachable"}, status_code=502)
+        log_event(log, "request", request_id=request_id, trace_id=_trace_id(span),
+                  tenant=tenant.id, model=str(model), status=502, retries=retries,
+                  duration_ms=round((time.perf_counter() - t_request) * 1000, 2))
+        return JSONResponse({"error": "all candidate backends unreachable"},
+                            status_code=502, headers={"x-request-id": request_id})
 
     breaker.record_success(r.backend_id)
     metrics.inc_counter("gateway_requests_total", help="Total routed requests",
@@ -246,7 +269,8 @@ async def chat_completions(request: Request):
     metrics.observe("gateway_prefix_match_blocks", r.match_blocks, buckets=BLOCK_BUCKETS,
                     help="Prefix blocks reused (cache affinity) per request")
 
-    headers = {"x-gw-backend": r.backend_id, "x-gw-match-blocks": str(r.match_blocks)}
+    headers = {"x-gw-backend": r.backend_id, "x-gw-match-blocks": str(r.match_blocks),
+               "x-request-id": request_id}
     cache_hit = upstream.headers.get("x-prefix-cache-hit")
     if cache_hit is not None:
         headers["x-prefix-cache-hit"] = cache_hit
@@ -277,6 +301,12 @@ async def chat_completions(request: Request):
             span.set_attribute("output.tokens", actual_output)
             span.set_status(Status(StatusCode.OK))
             span.end()
+            log_event(log, "request", request_id=request_id, trace_id=_trace_id(span),
+                      tenant=tenant.id, model=str(model), strategy=eff_strategy,
+                      backend=final_r.backend_id, match_blocks=final_r.match_blocks,
+                      cache_hit=(cache_hit == "true") if cache_hit is not None else None,
+                      retries=retries, output_tokens=actual_output, status=200,
+                      duration_ms=round((time.perf_counter() - t_request) * 1000, 2))
 
     return StreamingResponse(
         body_iter(),
