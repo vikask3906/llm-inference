@@ -78,7 +78,11 @@ be fast; metric scraping and table maintenance are off the critical path.
 - `RadixTree` — approximate global prefix → backend map (longest-prefix match).
 - `LoadTracker` — real-time in-flight accounting + scraped-metric reconciliation.
 - `BackendRegistry` — membership, model filtering, health.
-- `server` — async reverse proxy + SSE streaming + control-plane scrape loop.
+- `CircuitBreaker` — per-backend 3-state breaker (closed/open/half-open) with
+  cooldown + half-open probe recovery, driven by request outcomes and scrapes.
+- `MetricsCollector` — Prometheus metrics at `/metrics` (request/cache/error
+  counters, routing-latency + match-block histograms, inflight/health/circuit gauges).
+- `server` — async reverse proxy + SSE streaming + failover + control-plane loop.
 
 ---
 
@@ -238,9 +242,16 @@ Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 ---
 
 ## 11. Failure handling
-- **Mid-stream failure:** a stream can be retried only **before the first byte**;
-  after tokens are sent, retrying would duplicate output, so the error propagates.
-- **Backend unreachable:** gateway returns 502, marks the node unhealthy.
+- **Safe failover:** a pre-first-byte connect failure re-routes optimally on the
+  shrinking candidate set, up to `max_retries`. After the first byte, retrying
+  would duplicate tokens, so a mid-stream failure propagates instead.
+- **Circuit breaking:** consecutive failures open a backend's circuit; it's
+  excluded from routing for `cooldown_s`, then a half-open probe either closes it
+  (success) or reopens it (failure). If *all* circuits are open, the gateway
+  degrades to trying all backends rather than hard-failing.
+- **Automatic recovery:** the control-plane scrape loop records success/failure
+  into the breaker, so a backend recovers without needing live request traffic.
+- **Backend unreachable (all candidates):** gateway returns 502.
 - **Health failure:** membership eviction removes the node from all holders.
 - **All candidates saturated:** fall back to the least-loaded node.
 
@@ -248,8 +259,9 @@ Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 
 ## 12. Roadmap (Phase 2+)
 - Real **vLLM** on ≥2 cheap cloud GPUs; fit the bilinear cost model from timings.
-- **Prometheus**-format scraping; OpenTelemetry/Jaeger tracing; Grafana dashboard
-  (TTFT + hit rate vs NGINX round-robin).
+- Gateway **Prometheus `/metrics`** exposed ✓ (routing-latency + cache + match-block
+  metrics); next: OpenTelemetry/Jaeger tracing + Grafana dashboard (TTFT + hit
+  rate vs NGINX round-robin) and Prometheus-format scraping of backends.
 - **Rust** hot-path rewrite with profiled latency/throughput before/after.
 - **Path compression** + COW/epoch reclamation in the tree.
 - **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its
@@ -269,3 +281,5 @@ Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 - Stale-metrics herd behavior → real-time in-flight accounting.
 - The calibration bug: a concrete story of profiling-then-fixing with numbers.
 - Language choice as a *measured* optimization (Python baseline → Rust hot path).
+- Instrumenting the gateway's own added latency (routing-latency histogram) to
+  back the "<2ms overhead" claim with data rather than assertion.

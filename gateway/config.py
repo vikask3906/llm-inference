@@ -36,6 +36,11 @@ class Config:
     # round_robin | consistent_hash | prefix_tree
     strategy: str = "prefix_tree"
 
+    # --- Fault tolerance ---
+    max_retries: int = 2                 # failover attempts before first byte
+    circuit_fail_threshold: int = 3      # consecutive failures -> open circuit
+    circuit_cooldown_s: float = 5.0      # open duration before a half-open probe
+
     # --- Backends (used by the HTTP layer) ---
     # Comma-separated "id=url" pairs, all assumed to serve `default_model`.
     backends: str = "b0=http://localhost:9001,b1=http://localhost:9002,b2=http://localhost:9003"
