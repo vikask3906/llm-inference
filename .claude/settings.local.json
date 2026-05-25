@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo --version)",
+      "Bash(go version *)",
+      "Bash(docker --version)",
+      "Bash(rustc --version)",
+      "Bash(python bench/sim.py)",
+      "Bash(python -m py_compile gateway/__init__.py gateway/config.py gateway/hashing.py gateway/radix_tree.py gateway/load_tracker.py gateway/router.py gateway/backends.py gateway/server.py mock_backend/__init__.py mock_backend/app.py bench/sim.py bench/loadtest.py)",
+      "Bash(python -m pip install -q -r requirements.txt)",
+      "Bash(python bench/e2e_inproc.py)",
+      "Bash(python -m pip install -q pytest)",
+      "Bash(python -m pytest -q)"
+    ]
+  }
+}

@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+"""Backend registry. Parses "id=url" pairs and tracks per-backend health.
+
+Routing is two-stage: first filter to backends serving the request's model, then
+apply prefix-affinity + load within that pool. MVP assumes a homogeneous fleet
+(all serve default_model); heterogeneous fleets are a Phase-2 extension.
+"""
+
+from .config import Config
+
+
+class Backend:
+    __slots__ = ("id", "url", "model", "healthy")
+
+    def __init__(self, id: str, url: str, model: str) -> None:
+        self.id = id
+        self.url = url
+        self.model = model
+        self.healthy = True
+
+
+class BackendRegistry:
+    def __init__(self, cfg: Config) -> None:
+        self._by_id: dict[str, Backend] = {}
+        for pair in cfg.backends.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            bid, _, url = pair.partition("=")
+            self._by_id[bid.strip()] = Backend(bid.strip(), url.strip(), cfg.default_model)
+
+    def all(self) -> list[Backend]:
+        return list(self._by_id.values())
+
+    def url(self, backend_id: str) -> str:
+        return self._by_id[backend_id].url
+
+    def set_health(self, backend_id: str, healthy: bool) -> None:
+        b = self._by_id.get(backend_id)
+        if b:
+            b.healthy = healthy
+
+    def ids_for(self, model: str | None) -> list[str]:
+        return [
+            b.id for b in self._by_id.values()
+            if b.healthy and (model is None or model == b.model)
+        ]

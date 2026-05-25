@@ -1,0 +1,22 @@
+services:
+  b0:
+    build: .
+    command: uvicorn mock_backend.app:app --host 0.0.0.0 --port 9000
+    environment: { MOCK_NODE_ID: b0, MOCK_CAP_BLOCKS: "600" }
+  b1:
+    build: .
+    command: uvicorn mock_backend.app:app --host 0.0.0.0 --port 9000
+    environment: { MOCK_NODE_ID: b1, MOCK_CAP_BLOCKS: "600" }
+  b2:
+    build: .
+    command: uvicorn mock_backend.app:app --host 0.0.0.0 --port 9000
+    environment: { MOCK_NODE_ID: b2, MOCK_CAP_BLOCKS: "600" }
+
+  gateway:
+    build: .
+    command: uvicorn gateway.server:app --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+    environment:
+      GW_BACKENDS: "b0=http://b0:9000,b1=http://b1:9000,b2=http://b2:9000"
+      GW_STRATEGY: prefix_tree
+    depends_on: [b0, b1, b2]
