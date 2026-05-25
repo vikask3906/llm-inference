@@ -290,6 +290,17 @@ Admission control sits **before** routing; the router/est-TTFT logic is untouche
 - **Enforcement is opt-in** (`rate_limit_enabled`); tenant attribution metrics are
   always emitted (`gateway_tenant_{requests,throttled,tokens,inflight}_total`).
 
+**Result (`bench/fairness_sim.py`):** a greedy tenant floods at 10× its quota
+while a polite tenant stays within quota. Same total budget, two designs:
+
+| limiter | polite tenant served | greedy tenant served |
+|---|---|---|
+| shared global bucket | **16%** (starved) | 21% |
+| per-tenant buckets | **100%** | 11% |
+
+Per-tenant isolation guarantees the well-behaved tenant full service regardless
+of the abuser — the core fairness property.
+
 ---
 
 ## 13. Roadmap (Phase 2+)
