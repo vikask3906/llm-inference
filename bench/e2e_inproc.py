@@ -9,6 +9,7 @@ in-flight accounting -> upstream SSE stream -> header propagation.
 """
 
 import asyncio
+import logging
 import os
 import random
 import sys
@@ -24,6 +25,8 @@ from gateway.radix_tree import RadixTree      # noqa: E402
 from gateway.router import Router             # noqa: E402
 import gateway.server as gw                   # noqa: E402
 from mock_backend.app import create_app       # noqa: E402
+
+logging.getLogger("gateway").setLevel(logging.WARNING)   # quiet per-request logs in the demo
 
 DOC_CHARS, N_DOCS = 6144, 15
 

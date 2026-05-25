@@ -218,8 +218,8 @@ per-backend cache models** (the backend's own truth), not the gateway's belief.
 
 | Scenario | round-robin | consistent-hash | **prefix-tree** |
 |---|---|---|---|
-| sim, uniform docs | 40.5% | 40.1% (load → 1 node) | **97.6%** (balanced) |
-| sim, skewed/hot docs | 62.0% | 62.7% (load → 1 node) | **96.6%** (balanced) |
+| sim, uniform docs | 40.5% | 40.1% (load → 1 node) | **99.3%** (balanced) |
+| sim, skewed/hot docs | 62.0% | 62.7% (load → 1 node) | **99.3%** (balanced) |
 | HTTP e2e (ASGI) | 45.2% | 45.8% (load → 1 node) | **98.3%** (balanced) |
 
 Prefix-aware routing ≈ **2.4× the cache hit rate** while keeping load balanced;
