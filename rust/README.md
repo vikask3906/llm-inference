@@ -21,14 +21,21 @@ Mirrors the Python modules 1:1 so behaviour is identical
   back) + `/healthz`. The routing lock is never held across an `.await`; an
   in-flight `Drop` guard decrements load even on client disconnect.
 - `bin/gateway.rs` — `cargo run --bin gateway`
+- `bin/mockbackend.rs` — fast axum mock (static SSE, ~43k req/s ceiling) used
+  to un-bottleneck throughput benchmarks
+- `bin/loadgen.rs` — `tokio + reqwest` load generator (the Python `httpx`
+  client capped at ~370 req/s, too slow to expose the gateways' real ceilings)
 
 Smoke test: Rust gateway → Python mock backend returns **200**, streams the SSE,
 propagates `x-gw-backend` + `x-prefix-cache-hit` (verified a real cold→warm
 prefix-cache hit through the Rust proxy).
 
-**Next:** port metrics / circuit breaker / tenancy, then the profiled
-Python-baseline-vs-Rust latency & throughput comparison (the "measured
-optimization" story).
+**Measured wins** (vs the Python gateway, same fast backend; see
+[../docs/BENCHMARKS.md](../docs/BENCHMARKS.md)): **+0.8 ms** added latency vs
++3.8 ms (~4.5× lower), **~16k req/s** at c=64 vs ~209 (~80× higher), and
+**p99 7.4 ms** vs 399 ms (~54× lower) under sustained load.
+
+**Next:** port metrics / circuit breaker / tenancy to Rust for feature parity.
 
 ## Build & run
 

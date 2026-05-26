@@ -12,6 +12,16 @@ path = "src/lib.rs"
 name = "gateway"
 path = "src/bin/gateway.rs"
 
+# Fast mock backend for un-bottlenecked throughput benchmarking.
+[[bin]]
+name = "mockbackend"
+path = "src/bin/mockbackend.rs"
+
+# Fast load generator (the Python httpx client caps ~370 req/s on one host).
+[[bin]]
+name = "loadgen"
+path = "src/bin/loadgen.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
