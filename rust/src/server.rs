@@ -4,11 +4,12 @@
 //! candidates by circuit -> route under a short sync lock (never held across
 //! `.await`) -> stream the upstream SSE back. Pre-first-byte failover re-routes
 //! optimally on the shrinking candidate set, with the breaker recording
-//! success/failure. An in-flight `Drop` guard decrements load AND releases the
-//! tenant in-flight slot even on client disconnect.
+//! success/failure. The in-flight `Drop` guard decrements load + releases the
+//! tenant in-flight slot + emits the per-request structured log line on stream
+//! end or client disconnect.
 //!
-//! Still deferred (present in Python): OpenTelemetry tracing, structured JSON
-//! logging, scrape-loop driven backend health.
+//! Still deferred (present in Python): OpenTelemetry tracing,
+//! scrape-loop driven backend health.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,7 @@ use futures_util::{Stream, StreamExt};
 use crate::circuit::CircuitBreaker;
 use crate::config::{Config, Strategy};
 use crate::load::LoadTracker;
+use crate::logging::{info_enabled, new_request_id, RequestLog};
 use crate::metrics::{MetricsCollector, BLOCK_BUCKETS, LATENCY_BUCKETS};
 use crate::radix_tree::RadixTree;
 use crate::router::{RouteResult, Router};
@@ -128,14 +130,29 @@ fn extract_prompt(body: &serde_json::Value) -> String {
     s
 }
 
-/// Decrements per-backend in-flight + tenant in-flight on stream end or drop
-/// (client disconnect), so neither counter can leak.
+struct LogCtx {
+    request_id: String,
+    tenant: String,
+    model: String,
+    strategy: &'static str,
+    match_blocks: usize,
+    retries: u32,
+    status: u16,
+    cache_hit: Option<bool>,
+    t_request: Instant,
+}
+
+/// Decrements per-backend in-flight + tenant in-flight + emits the per-request
+/// log line on stream end or drop, so accounting can't leak even on client
+/// disconnect.
 struct InflightGuard {
     state: SharedState,
     backend: String,
     tokens: u64,
     /// Some((tenant_id, reserved_output)) when rate-limit enabled; else None.
-    tenant: Option<(String, f64)>,
+    tenant_release: Option<(String, f64)>,
+    /// Some(...) when log_level is INFO; else None (logging suppressed).
+    log: Option<LogCtx>,
 }
 
 impl Drop for InflightGuard {
@@ -143,12 +160,29 @@ impl Drop for InflightGuard {
         if let Ok(mut inner) = self.state.inner.lock() {
             inner.load.on_complete(&self.backend, self.tokens);
         }
-        if let Some((tid, reserved)) = &self.tenant {
+        if let Some((tid, reserved)) = &self.tenant_release {
             if let Ok(mut lim) = self.state.limiter.lock() {
-                // We don't (yet) parse output tokens from the SSE stream, so we
-                // pass actual == reserved -> release the slot, no bucket adjust.
                 lim.release(tid, *reserved, *reserved);
             }
+        }
+        if let Some(c) = self.log.take() {
+            let dur = c.t_request.elapsed().as_secs_f64() * 1000.0;
+            RequestLog {
+                level: "INFO",
+                request_id: &c.request_id,
+                tenant: Some(&c.tenant),
+                model: Some(&c.model),
+                strategy: Some(c.strategy),
+                backend: Some(&self.backend),
+                match_blocks: Some(c.match_blocks),
+                cache_hit: c.cache_hit,
+                retries: Some(c.retries),
+                status: c.status,
+                reason: None,
+                duration_ms: dur,
+                output_tokens: None,
+            }
+            .emit();
         }
     }
 }
@@ -165,7 +199,7 @@ impl<S: Stream + Unpin> Stream for GuardedStream<S> {
     }
 }
 
-fn ratelimit_response(t: &Tenant, adm: &Admission) -> Response {
+fn ratelimit_response(t: &Tenant, adm: &Admission, request_id: &str) -> Response {
     let retry_after = if adm.retry_after.is_finite() {
         (adm.retry_after.ceil() as u64).max(1)
     } else {
@@ -183,15 +217,19 @@ fn ratelimit_response(t: &Tenant, adm: &Admission) -> Response {
         .header("Retry-After", retry_after)
         .header("X-RateLimit-Limit-Requests", t.rps as u64)
         .header("X-RateLimit-Limit-Tokens", t.tps as u64)
-        .header(
-            "X-RateLimit-Remaining-Requests",
-            adm.remaining_rps.max(0.0) as u64,
-        )
-        .header(
-            "X-RateLimit-Remaining-Tokens",
-            adm.remaining_tps.max(0.0) as u64,
-        )
+        .header("X-RateLimit-Remaining-Requests", adm.remaining_rps.max(0.0) as u64)
+        .header("X-RateLimit-Remaining-Tokens", adm.remaining_tps.max(0.0) as u64)
+        .header("x-request-id", request_id)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn plain_response(status: StatusCode, msg: &str, request_id: &str) -> Response {
+    Response::builder()
+        .status(status)
+        .header("content-type", "text/plain")
+        .header("x-request-id", request_id)
+        .body(Body::from(msg.to_string()))
         .unwrap()
 }
 
@@ -253,19 +291,33 @@ async fn chat_completions(
     headers: HeaderMap,
     body_bytes: Bytes,
 ) -> Response {
+    let t_request = Instant::now();
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(new_request_id);
+    let log_enabled = info_enabled(&state.cfg.log_level);
+
     let mut parsed: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid JSON").into_response(),
+        Err(_) => return plain_response(StatusCode::BAD_REQUEST, "invalid JSON", &request_id),
     };
     let prompt = extract_prompt(&parsed);
+    let model_str = parsed
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let strategy = headers
         .get("x-routing-strategy")
         .and_then(|v| v.to_str().ok())
         .and_then(parse_strategy)
         .unwrap_or(state.strategy);
+    let strat_name = strategy_name(strategy);
 
-    // --- tenant identification + (optional) admission control ---
+    // tenant + admission
     let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
     let tenant = state.tenants.resolve(auth_header);
     state.metrics.inc_counter(
@@ -275,7 +327,8 @@ async fn chat_completions(
         &[("tenant", &tenant.id)],
     );
 
-    let input_tokens = ((prompt.len() / state.cfg.chars_per_token.max(1) as usize) as f64).max(1.0);
+    let input_tokens =
+        ((prompt.len() / state.cfg.chars_per_token.max(1) as usize) as f64).max(1.0);
     let max_tokens = parsed
         .get("max_tokens")
         .and_then(|v| v.as_u64())
@@ -283,7 +336,7 @@ async fn chat_completions(
     let reserved_output = max_tokens.min(state.cfg.max_output_tokens as u64) as f64;
     let est_cost = input_tokens + reserved_output;
 
-    let mut admitted = false; // true only when rate_limit_enabled and admit() succeeded
+    let mut admitted = false;
     if state.cfg.rate_limit_enabled {
         let now_lim = state.clock.elapsed().as_secs_f64();
         let adm = state.limiter.lock().unwrap().admit(&tenant, est_cost, now_lim);
@@ -294,7 +347,26 @@ async fn chat_completions(
                 "Rate-limited requests per tenant",
                 &[("tenant", &tenant.id), ("reason", adm.reason.unwrap_or(""))],
             );
-            return ratelimit_response(&tenant, &adm);
+            if log_enabled {
+                let dur = t_request.elapsed().as_secs_f64() * 1000.0;
+                RequestLog {
+                    level: "INFO",
+                    request_id: &request_id,
+                    tenant: Some(&tenant.id),
+                    model: Some(&model_str),
+                    strategy: Some(strat_name),
+                    backend: None,
+                    match_blocks: None,
+                    cache_hit: None,
+                    retries: None,
+                    status: 429,
+                    reason: adm.reason,
+                    duration_ms: dur,
+                    output_tokens: None,
+                }
+                .emit();
+            }
+            return ratelimit_response(&tenant, &adm, &request_id);
         }
         admitted = true;
     }
@@ -310,11 +382,29 @@ async fn chat_completions(
             "Gateway-side errors",
             &[("code", "503")],
         );
-        return (StatusCode::SERVICE_UNAVAILABLE, "no backends").into_response();
+        if log_enabled {
+            let dur = t_request.elapsed().as_secs_f64() * 1000.0;
+            RequestLog {
+                level: "INFO",
+                request_id: &request_id,
+                tenant: Some(&tenant.id),
+                model: Some(&model_str),
+                strategy: Some(strat_name),
+                backend: None,
+                match_blocks: None,
+                cache_hit: None,
+                retries: None,
+                status: 503,
+                reason: Some("no_backend"),
+                duration_ms: dur,
+                output_tokens: None,
+            }
+            .emit();
+        }
+        return plain_response(StatusCode::SERVICE_UNAVAILABLE, "no backends", &request_id);
     }
 
-    // Per-tenant prefix isolation: seed the gateway's routing hashes AND tell
-    // the backend to salt its own KV cache (vLLM-style cache_salt).
+    // Per-tenant prefix isolation
     let mut seed: u64 = 0;
     if state.cfg.prefix_isolation == "tenant" {
         seed = tenant_seed(&tenant.id);
@@ -325,7 +415,7 @@ async fn chat_completions(
         Err(_) => body_bytes.clone(),
     };
 
-    // Exclude backends with an open circuit; degrade to all if every one is open.
+    // Circuit filter
     let now = state.clock.elapsed().as_secs_f64();
     let mut remaining: Vec<String> = {
         let breaker = state.breaker.lock().unwrap();
@@ -342,9 +432,8 @@ async fn chat_completions(
     let mut chosen: Option<RouteResult> = None;
     let mut upstream: Option<reqwest::Response> = None;
     let mut routing_recorded = false;
+    let mut retries: u32 = 0;
 
-    // Failover loop. Safe only before the first byte; once streaming starts,
-    // retrying would duplicate tokens, so a mid-stream failure propagates.
     for _ in 0..=state.cfg.max_retries {
         if remaining.is_empty() {
             break;
@@ -384,12 +473,7 @@ async fn chat_completions(
         let url = match url {
             Some(u) => u,
             None => {
-                state
-                    .inner
-                    .lock()
-                    .unwrap()
-                    .load
-                    .on_complete(&res.backend_id, res.tokens as u64);
+                state.inner.lock().unwrap().load.on_complete(&res.backend_id, res.tokens as u64);
                 continue;
             }
         };
@@ -414,6 +498,7 @@ async fn chat_completions(
                 state.inner.lock().unwrap().load.on_complete(&bid, toks);
                 state.breaker.lock().unwrap().record_failure(&bid, now2);
                 remaining.retain(|x| x != &bid);
+                retries += 1;
                 state.metrics.inc_counter(
                     "gateway_retries_total",
                     1.0,
@@ -436,18 +521,39 @@ async fn chat_completions(
                 "Gateway-side errors",
                 &[("code", "502")],
             );
-            return (StatusCode::BAD_GATEWAY, "all candidate backends unreachable")
-                .into_response();
+            if log_enabled {
+                let dur = t_request.elapsed().as_secs_f64() * 1000.0;
+                RequestLog {
+                    level: "INFO",
+                    request_id: &request_id,
+                    tenant: Some(&tenant.id),
+                    model: Some(&model_str),
+                    strategy: Some(strat_name),
+                    backend: None,
+                    match_blocks: None,
+                    cache_hit: None,
+                    retries: Some(retries),
+                    status: 502,
+                    reason: Some("unreachable"),
+                    duration_ms: dur,
+                    output_tokens: None,
+                }
+                .emit();
+            }
+            return plain_response(
+                StatusCode::BAD_GATEWAY,
+                "all candidate backends unreachable",
+                &request_id,
+            );
         }
     };
 
     state.breaker.lock().unwrap().record_success(&chosen.backend_id);
-    let strat = strategy_name(strategy);
     state.metrics.inc_counter(
         "gateway_requests_total",
         1.0,
         "Total routed requests",
-        &[("strategy", strat), ("backend", &chosen.backend_id)],
+        &[("strategy", strat_name), ("backend", &chosen.backend_id)],
     );
     state.metrics.inc_counter(
         "gateway_tenant_tokens_total",
@@ -464,12 +570,13 @@ async fn chat_completions(
     );
 
     let status = upstream.status().as_u16();
-    let cache_hit = upstream
+    let cache_hit_str = upstream
         .headers()
         .get("x-prefix-cache-hit")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    if let Some(ch) = &cache_hit {
+    let cache_hit_bool = cache_hit_str.as_deref().map(|s| s == "true");
+    if let Some(ch) = &cache_hit_str {
         let name = if ch == "true" {
             "gateway_cache_hits_total"
         } else {
@@ -485,19 +592,36 @@ async fn chat_completions(
 
     let bid = chosen.backend_id.clone();
     let toks = chosen.tokens as u64;
+    let log_ctx = if log_enabled {
+        Some(LogCtx {
+            request_id: request_id.clone(),
+            tenant: tenant.id.clone(),
+            model: model_str,
+            strategy: strat_name,
+            match_blocks: chosen.match_blocks,
+            retries,
+            status,
+            cache_hit: cache_hit_bool,
+            t_request,
+        })
+    } else {
+        None
+    };
     let guard = InflightGuard {
         state: state.clone(),
         backend: bid.clone(),
         tokens: toks,
-        tenant: if admitted { Some((tenant.id.clone(), reserved_output)) } else { None },
+        tenant_release: if admitted { Some((tenant.id.clone(), reserved_output)) } else { None },
+        log: log_ctx,
     };
     let guarded = GuardedStream { inner: upstream.bytes_stream().boxed(), _guard: guard };
 
     let mut builder = Response::builder()
         .status(status)
         .header("x-gw-backend", bid)
-        .header("x-gw-match-blocks", chosen.match_blocks.to_string());
-    if let Some(ch) = cache_hit {
+        .header("x-gw-match-blocks", chosen.match_blocks.to_string())
+        .header("x-request-id", &request_id);
+    if let Some(ch) = cache_hit_str {
         builder = builder.header("x-prefix-cache-hit", ch);
     }
     builder.body(Body::from_stream(guarded)).unwrap()

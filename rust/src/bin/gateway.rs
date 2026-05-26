@@ -36,6 +36,9 @@ async fn main() {
     if let Ok(v) = env::var("GW_PREFIX_ISOLATION") {
         cfg.prefix_isolation = v;
     }
+    if let Ok(v) = env::var("GW_LOG_LEVEL") {
+        cfg.log_level = v;
+    }
 
     let spec = env::var("GW_BACKENDS").unwrap_or_else(|_| {
         "b0=http://localhost:9001,b1=http://localhost:9002,b2=http://localhost:9003".to_string()

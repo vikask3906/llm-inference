@@ -9,6 +9,7 @@ pub mod circuit;
 pub mod config;
 pub mod hashing;
 pub mod load;
+pub mod logging;
 pub mod metrics;
 pub mod radix_tree;
 pub mod router;

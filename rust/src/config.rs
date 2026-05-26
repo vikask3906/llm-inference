@@ -32,6 +32,9 @@ pub struct Config {
     pub default_output_tokens: u32,
     pub max_output_tokens: u32,
     pub chars_per_token: u32,
+
+    // --- observability ---
+    pub log_level: String, // "INFO" | "WARN"  (WARN suppresses per-request log)
 }
 
 impl Default for Config {
@@ -56,6 +59,7 @@ impl Default for Config {
             default_output_tokens: 256,
             max_output_tokens: 4096,
             chars_per_token: 4,
+            log_level: "INFO".to_string(),
         }
     }
 }

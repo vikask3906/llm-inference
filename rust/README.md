@@ -8,7 +8,10 @@ Mirrors the Python modules 1:1 so behaviour is identical
 
 ## Status
 
-**Core + parity ported & tested (42 unit tests); HTTP proxy smoke-tested end-to-end.**
+**Full-parity port: 45 unit tests passing; HTTP proxy smoke-tested end-to-end.**
+The Rust gateway now matches every per-request thing the Python gateway does
+(metrics + circuit + failover + tenancy + structured JSON logging), modulo
+OpenTelemetry tracing.
 
 - `hashing.rs` — chained FNV block hashing + tenant `stable_seed`
 - `radix_tree.rs` — path-compressed prefix tree: longest-contiguous match,
@@ -31,6 +34,8 @@ Mirrors the Python modules 1:1 so behaviour is identical
 - `tenancy.rs` — TokenBucket, TenantRegistry (bearer-key resolve), RateLimiter
   (RPS + TPS + in-flight cap, refund-on-second-fail, release reconciliation),
   `tenant_seed` for per-tenant prefix isolation
+- `logging.rs` — structured JSON log line per request (`request_id` correlatable
+  with the `x-request-id` response header + `duration_ms` + outcome fields)
 
 Smoke test: Rust gateway → Python mock backend returns **200**, streams the SSE,
 propagates `x-gw-backend` + `x-prefix-cache-hit` (verified a real cold→warm
@@ -47,8 +52,12 @@ JSON error body matching Python. Per-tenant metrics (`gateway_tenant_requests_to
 `gateway_tenant_throttled_total{reason}`, `gateway_tenant_tokens_total`,
 `gateway_tenant_inflight`) all flow through `/metrics`.
 
-**Next:** structured JSON logging (request_id correlated with traces), then a
-final parity-fair benchmark.
+**Final benchmark (full-parity Rust vs Python, same fast backend, c=64):**
+**10,922 req/s** vs Python's 209 → **~52× higher throughput**; **p99 12.2 ms**
+vs 399.5 ms → **~33× lower tail**.
+
+**Remaining (optional polish):** OpenTelemetry tracing port, control-plane
+scrape loop for backend health.
 
 ## Build & run
 
