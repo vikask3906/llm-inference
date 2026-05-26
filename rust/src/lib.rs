@@ -13,3 +13,4 @@ pub mod metrics;
 pub mod radix_tree;
 pub mod router;
 pub mod server;
+pub mod tenancy;

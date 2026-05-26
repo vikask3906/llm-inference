@@ -24,6 +24,14 @@ pub struct Config {
     pub max_retries: u32,
     pub circuit_fail_threshold: u32,
     pub circuit_cooldown_s: f64,
+
+    // --- multi-tenancy / fairness ---
+    pub rate_limit_enabled: bool,
+    pub tenants: String,           // "key=tenant:tier,..."
+    pub prefix_isolation: String,  // "tenant" | "global"
+    pub default_output_tokens: u32,
+    pub max_output_tokens: u32,
+    pub chars_per_token: u32,
 }
 
 impl Default for Config {
@@ -42,6 +50,12 @@ impl Default for Config {
             max_retries: 2,
             circuit_fail_threshold: 3,
             circuit_cooldown_s: 5.0,
+            rate_limit_enabled: false,
+            tenants: String::new(),
+            prefix_isolation: "tenant".to_string(),
+            default_output_tokens: 256,
+            max_output_tokens: 4096,
+            chars_per_token: 4,
         }
     }
 }
