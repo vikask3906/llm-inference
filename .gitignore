@@ -25,3 +25,6 @@ env/
 
 # Claude Code local config (machine-local, not for the repo)
 .claude/settings.local.json
+
+# Rust build artifacts
+rust/target/

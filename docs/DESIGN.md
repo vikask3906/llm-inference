@@ -313,7 +313,8 @@ of the abuser — the core fairness property.
   OpenTelemetry tracing ✓, and a provisioned **Grafana dashboard** ✓
   (`docker compose up` → Grafana :3000, Prometheus :9090); next: a vs-NGINX
   round-robin comparison panel.
-- **Rust** hot-path rewrite with profiled latency/throughput before/after.
+- **Rust** hot-path rewrite (`rust/`): data-plane core ported & tested ✓ (20
+  tests); Tokio/hyper streaming proxy next, with profiled latency before/after.
 - COW/epoch reclamation in the tree (path compression is implemented ✓).
 - **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its
   place) or a deterministic shared hash ring to keep prefix routing consistent.

@@ -1,0 +1,13 @@
+[package]
+name = "gateway-core"
+version = "0.1.0"
+edition = "2021"
+description = "Prefix-aware LLM inference gateway — data-plane core (Rust port of the Python MVP hot path)"
+
+[lib]
+name = "gateway_core"
+path = "src/lib.rs"
+
+# The routing core is std-only so it type-checks/builds without external crates.
+# The HTTP layer (tokio + hyper/axum streaming proxy) is added in a later phase.
+[dependencies]

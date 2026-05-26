@@ -294,9 +294,10 @@ CI (`.github/workflows/ci.yml`): pytest + the three benchmarks as gates, on 3.11
 
 - **Real vLLM on GPUs** — current proof is correctness + (hardware-agnostic)
   cache-hit rate; the TTFT-reduction number needs real GPUs.
-- **Rust hot-path rewrite** — in progress (`rust/`): port the data-plane core
-  (hashing, radix tree, router) then the Tokio/hyper streaming proxy, for
-  profiled before/after latency vs this Python baseline.
+- **Rust hot-path rewrite** (`rust/`) — data-plane core **ported & tested** (20
+  Rust tests: hashing, path-compressed radix tree, est-TTFT router, load); next
+  the Tokio/hyper streaming proxy, for profiled before/after latency vs this
+  Python baseline.
 - Token-accurate tokenization (vs char-blocks), backend Prometheus-format
   scraping (mock emits JSON), weighted fair queuing, multi-replica + shared
   prefix state (etcd), disaggregated prefill/decode routing.
