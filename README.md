@@ -46,6 +46,10 @@ tenant stays within quota (same total budget):
 | shared global bucket | 16% (starved) |
 | **per-tenant buckets (this)** | **100%** |
 
+**Gateway overhead — Python vs Rust hot path** (per-request added latency at
+concurrency 1, backend time subtracted): Python **+3.8 ms** vs Rust **+0.8 ms**
+(~4.5× lower). See **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
+
 Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 `python bench/fairness_sim.py`.
 
