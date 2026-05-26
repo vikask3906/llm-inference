@@ -30,12 +30,12 @@ Smoke test: Rust gateway → Python mock backend returns **200**, streams the SS
 propagates `x-gw-backend` + `x-prefix-cache-hit` (verified a real cold→warm
 prefix-cache hit through the Rust proxy).
 
-**Measured wins** (vs the Python gateway, same fast backend; see
-[../docs/BENCHMARKS.md](../docs/BENCHMARKS.md)): **+0.8 ms** added latency vs
-+3.8 ms (~4.5× lower), **~16k req/s** at c=64 vs ~209 (~80× higher), and
-**p99 7.4 ms** vs 399 ms (~54× lower) under sustained load.
+**Measured (parity gateway with metrics + circuit + failover; same fast backend;
+see [../docs/BENCHMARKS.md](../docs/BENCHMARKS.md)):** ~9.8k req/s at c=64 vs
+Python's ~209 (~47× higher), p99 13.5 ms vs 399.5 ms (~30× lower), and +0.8 ms
+added latency at c=1 vs Python's +3.8 ms (~4.5× lower).
 
-**Next:** port metrics / circuit breaker / tenancy to Rust for feature parity.
+**Next:** port tenancy / rate-limiting and structured JSON logging for full parity.
 
 ## Build & run
 

@@ -48,11 +48,14 @@ tenant stays within quota (same total budget):
 
 **Python gateway vs Rust hot-path rewrite** — measured on the same fast backend:
 
-| metric | Python | **Rust** | ratio |
-|---|---|---|---|
-| added latency (c=1) | +3.8 ms | **+0.8 ms** | **~4.5× lower** |
-| throughput (c=64) | 209 req/s | **16,651 req/s** | **~80× higher** |
-| p99 under load (c=64) | 399.51 ms | **7.38 ms** | **~54× lower** |
+Two Rust flavors below — **lean** (routing+streaming only) and **parity** (adds
+metrics + circuit breaker + failover, matching Python's per-request work):
+
+| metric (c=64) | Python | lean Rust | **parity Rust** | parity ratio |
+|---|---|---|---|---|
+| throughput | 209 req/s | 16,651 | **9,822 req/s** | **~47× higher** |
+| p99 under load | 399.51 ms | 7.38 ms | **13.50 ms** | **~30× lower** |
+| added latency (c=1) | +3.8 ms | +0.8 ms | — | ~4.5× lower (lean) |
 
 See **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** for methodology and full tables.
 
