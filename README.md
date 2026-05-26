@@ -145,9 +145,9 @@ for a complete file-by-file account of everything implemented.
 ## Roadmap
 
 - Real **vLLM** on GPUs for the headline TTFT-reduction number.
-- **Rust** hot-path rewrite ([`rust/`](rust/)): data-plane core ported & tested ✓
-  (hashing, radix tree, router — 20 tests); next the Tokio/hyper streaming proxy
-  with profiled before/after latency.
+- **Rust** hot-path rewrite ([`rust/`](rust/)): data-plane core + axum/reqwest
+  streaming proxy done ✓ (20 core tests; e2e smoke-tested vs the mock backend);
+  next port metrics/circuit/tenancy + the profiled before/after latency vs Python.
 - Backend Prometheus scraping, token-accurate tokenization, weighted fair
   queuing, and a multi-replica gateway with shared prefix state.
 

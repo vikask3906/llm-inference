@@ -8,7 +8,7 @@ Mirrors the Python modules 1:1 so behaviour is identical
 
 ## Status
 
-Ported & tested (std-only, **20 tests passing**):
+**Core ported & tested (20 unit tests); HTTP proxy smoke-tested end-to-end.**
 
 - `hashing.rs` — chained FNV block hashing + tenant `stable_seed`
 - `radix_tree.rs` — path-compressed prefix tree: longest-contiguous match,
@@ -16,15 +16,25 @@ Ported & tested (std-only, **20 tests passing**):
 - `router.rs` — est-TTFT routing + load-spread tiebreak (round_robin /
   consistent_hash / prefix_tree)
 - `load.rs`, `config.rs` — real-time load signals + tunables
+- `server.rs` — **axum + reqwest streaming proxy**: OpenAI-compatible
+  `/v1/chat/completions` (routes via the core, streams the upstream SSE straight
+  back) + `/healthz`. The routing lock is never held across an `.await`; an
+  in-flight `Drop` guard decrements load even on client disconnect.
+- `bin/gateway.rs` — `cargo run --bin gateway`
 
-**Next:** the async HTTP layer (Tokio + hyper/axum) — OpenAI-compatible SSE
-streaming proxy + control-plane scrape loop — then a profiled latency/throughput
-comparison against the Python baseline (the "measured optimization" story).
+Smoke test: Rust gateway → Python mock backend returns **200**, streams the SSE,
+propagates `x-gw-backend` + `x-prefix-cache-hit` (verified a real cold→warm
+prefix-cache hit through the Rust proxy).
 
-## Build & test
+**Next:** port metrics / circuit breaker / tenancy, then the profiled
+Python-baseline-vs-Rust latency & throughput comparison (the "measured
+optimization" story).
+
+## Build & run
 
 ```bash
 cd rust
-cargo test     # 20 tests
-cargo check    # type-check only (no linker required)
+cargo test                 # 20 core unit tests
+cargo build --bin gateway  # build the proxy
+GW_BACKENDS="b0=http://127.0.0.1:9001" cargo run --bin gateway   # serve on :8000
 ```
