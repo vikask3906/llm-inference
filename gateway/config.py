@@ -41,6 +41,15 @@ class Config:
     circuit_fail_threshold: int = 3      # consecutive failures -> open circuit
     circuit_cooldown_s: float = 5.0      # open duration before a half-open probe
 
+    # --- Multi-tenancy / fairness ---
+    rate_limit_enabled: bool = False        # enforcement is opt-in (needs tenants/tiers)
+    # "key=tenant:tier,..."  tier in {gold, silver, bronze}; unknown keys -> anonymous
+    tenants: str = ""
+    prefix_isolation: str = "tenant"        # tenant | global (cross-tenant cache sharing)
+    default_output_tokens: int = 256        # TPS reservation when max_tokens is absent
+    max_output_tokens: int = 4096           # cap on the output reservation
+    chars_per_token: int = 4                # prompt token estimate for quota accounting
+
     # --- Backends (used by the HTTP layer) ---
     # Comma-separated "id=url" pairs, all assumed to serve `default_model`.
     backends: str = "b0=http://localhost:9001,b1=http://localhost:9002,b2=http://localhost:9003"

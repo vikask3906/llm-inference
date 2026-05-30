@@ -82,6 +82,8 @@ be fast; metric scraping and table maintenance are off the critical path.
   cooldown + half-open probe recovery, driven by request outcomes and scrapes.
 - `MetricsCollector` — Prometheus metrics at `/metrics` (request/cache/error
   counters, routing-latency + match-block histograms, inflight/health/circuit gauges).
+- `TenantRegistry` / `RateLimiter` — tenant resolution + per-tenant RPS/TPS token
+  buckets and in-flight caps (admission control, before routing).
 - `server` — async reverse proxy + SSE streaming + failover + control-plane loop.
 
 ---
@@ -266,7 +268,29 @@ Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 
 ---
 
-## 12. Roadmap (Phase 2+)
+## 12. Multi-tenant fairness & QoS
+Admission control sits **before** routing; the router/est-TTFT logic is untouched.
+
+- **Identification:** `Authorization: Bearer <key>` → `TenantRegistry` maps key →
+  tenant + quota tier; unknown/missing key → a low-quota `anonymous` tenant.
+- **Rate limiting:** per-tenant **token buckets** on **both RPS and TPS** (mirrors
+  OpenAI RPM+TPM). TPS is the resource-aligned limit; RPS is a cheap abuse guard;
+  a request must pass both, plus a per-tenant **in-flight cap** for fairness.
+- **TPS accounting:** reserve `input_tokens + estimated_output` at admission
+  (`max_tokens` or a default), then **reconcile** the bucket with actual streamed
+  output on completion.
+- **Over-quota → `429`** with `Retry-After` + `X-RateLimit-*` headers (correct
+  backpressure, no gateway memory growth), not queuing.
+- **Prefix isolation:** per-tenant by default — the routing hash chain is seeded by
+  tenant **and** the backend is told to salt its KV cache (vLLM `cache_salt`), so
+  tenants neither share nor leak (via TTFT timing) each other's cache. `global`
+  keeps caches shared for a trusted single-org deployment.
+- **Enforcement is opt-in** (`rate_limit_enabled`); tenant attribution metrics are
+  always emitted (`gateway_tenant_{requests,throttled,tokens,inflight}_total`).
+
+---
+
+## 13. Roadmap (Phase 2+)
 - Real **vLLM** on ≥2 cheap cloud GPUs; fit the bilinear cost model from timings.
 - Gateway **Prometheus `/metrics`** exposed ✓ (routing-latency + cache + match-block
   metrics); next: OpenTelemetry/Jaeger tracing + Grafana dashboard (TTFT + hit
@@ -276,12 +300,13 @@ Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 - **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its
   place) or a deterministic shared hash ring to keep prefix routing consistent.
 - **Heterogeneous fleet:** route by model first, then affinity+load.
-- **Fairness / multi-tenancy:** per-tenant QoS, rate limits, priorities.
+- **Multi-tenant fairness:** per-tenant RPS+TPS limits, in-flight caps, prefix
+  isolation ✓; next: weighted fair queuing across tenants, priority tiers.
 - **Disaggregated prefill/decode** routing (DistServe-style) as a routing axis.
 
 ---
 
-## 13. Interview talking points
+## 14. Interview talking points
 - Why round-robin is wrong for stateful LLM serving (KV/prefix cache physics).
 - Radix tree + longest-prefix match vs consistent hashing — and *why* the latter
   collapses load onto one node (demonstrated: `0/3000/0`).
@@ -292,3 +317,5 @@ Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 - Language choice as a *measured* optimization (Python baseline → Rust hot path).
 - Instrumenting the gateway's own added latency (routing-latency histogram) to
   back the "<2ms overhead" claim with data rather than assertion.
+- Why TPS (not RPS) is the fair unit for LLM quotas, and isolating per-tenant KV
+  cache (routing seed + `cache_salt`) to close the cross-tenant TTFT side channel.
