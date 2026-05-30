@@ -38,8 +38,13 @@ PORT0="${PORT0:-9001}"
 PORT1="${PORT1:-9002}"
 GW_PORT="${GW_PORT:-8000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.25}"
-N_DOCS="${N_DOCS:-200}"
+# n_docs is sized so prefix_tree's half (n_docs/2) ~fits the KV cache while
+# round_robin's full n_docs doesn't -- the regime where routing discriminates.
+# ~50 large docs suits a ~170K-token cache (util 0.20 on a 48GB A40).
+N_DOCS="${N_DOCS:-50}"
 DOC_CHARS="${DOC_CHARS:-24000}"
+TTFT_N="${TTFT_N:-600}"            # measurement requests (keep > n_docs for revisits)
+WARMUP_N="${WARMUP_N:-150}"        # pre-populate the cache to steady state
 PIN_VERSIONS="${PIN_VERSIONS:-1}"
 
 ROOT="$(pwd)"
@@ -155,21 +160,22 @@ run_one_strategy() {
         --label "baseline $strat" \
         "http://127.0.0.1:$PORT0" "http://127.0.0.1:$PORT1"
 
-    echo ">> warmup pass (populates prefix cache on the chosen backends)..."
+    echo ">> warmup pass ($WARMUP_N reqs, populates prefix cache to steady state)..."
     python bench/loadtest.py --url "http://127.0.0.1:$GW_PORT" \
         --strategy "$strat" \
-        --n 100 --concurrency 8 \
+        --n "$WARMUP_N" --concurrency 8 \
         --n-docs "$N_DOCS" --doc-chars "$DOC_CHARS" \
         --model "$SERVED_NAME" --max-tokens 8 \
         > "$LOG_DIR/warmup-$strat.log"
 
-    echo ">> TTFT measurement (n=200, c=8)..."
+    echo ">> TTFT measurement (n=$TTFT_N, c=8, $N_DOCS docs x $DOC_CHARS chars)..."
     python bench/ttft_bench.py \
         --url "http://127.0.0.1:$GW_PORT" \
         --strategy "$strat" \
-        --n 200 --concurrency 8 \
+        --n "$TTFT_N" --concurrency 8 \
+        --n-docs "$N_DOCS" --doc-chars "$DOC_CHARS" \
         --model "$SERVED_NAME" \
-        --label "$strat n=200 c=8" \
+        --label "$strat n=$TTFT_N c=8" \
         | tee -a "$OUT"
 
     echo ">> final cache stats (delta from baseline = $strat's contribution):"
