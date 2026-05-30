@@ -84,6 +84,8 @@ be fast; metric scraping and table maintenance are off the critical path.
   counters, routing-latency + match-block histograms, inflight/health/circuit gauges).
 - `TenantRegistry` / `RateLimiter` — tenant resolution + per-tenant RPS/TPS token
   buckets and in-flight caps (admission control, before routing).
+- `tracing` — OpenTelemetry: one `chat.completion` span per request (model,
+  tenant, backend, cache hit, retries, status, output tokens), OTLP-exportable.
 - `server` — async reverse proxy + SSE streaming + failover + control-plane loop.
 
 ---
@@ -292,9 +294,9 @@ Admission control sits **before** routing; the router/est-TTFT logic is untouche
 
 ## 13. Roadmap (Phase 2+)
 - Real **vLLM** on ≥2 cheap cloud GPUs; fit the bilinear cost model from timings.
-- Gateway **Prometheus `/metrics`** exposed ✓ (routing-latency + cache + match-block
-  metrics); next: OpenTelemetry/Jaeger tracing + Grafana dashboard (TTFT + hit
-  rate vs NGINX round-robin) and Prometheus-format scraping of backends.
+- Observability: Prometheus `/metrics` ✓ and OpenTelemetry tracing ✓ (per-request
+  spans, OTLP-exportable to Jaeger); next: Grafana dashboard (TTFT + hit rate vs
+  NGINX round-robin) and Prometheus-format scraping of backends.
 - **Rust** hot-path rewrite with profiled latency/throughput before/after.
 - COW/epoch reclamation in the tree (path compression is implemented ✓).
 - **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its
