@@ -62,9 +62,10 @@ async def main() -> None:
     ap.add_argument("--n-docs", type=int, default=50,
                     help="distinct large documents (the working set); size so "
                          "n_docs/2 docs ~fit the KV cache but n_docs don't")
-    ap.add_argument("--doc-chars", type=int, default=24000,
-                    help="chars per document (~4 chars/token); big => a cache miss "
-                         "costs a real prefill, so TTFT moves")
+    ap.add_argument("--doc-chars", type=int, default=12000,
+                    help="chars per document (this repetitive text is ~3 chars/token, "
+                         "so ~12000 chars ~= 4-6K tokens); big => a cache miss costs a "
+                         "real prefill, so TTFT moves. Keep doc tokens < vLLM max-model-len")
     ap.add_argument("--system-chars", type=int, default=512,
                     help="shared system-prefix length (kept small so the variable "
                          "doc dominates the hit-rate signal)")

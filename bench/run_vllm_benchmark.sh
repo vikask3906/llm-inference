@@ -42,7 +42,11 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.25}"
 # round_robin's full n_docs doesn't -- the regime where routing discriminates.
 # ~50 large docs suits a ~170K-token cache (util 0.20 on a 48GB A40).
 N_DOCS="${N_DOCS:-50}"
-DOC_CHARS="${DOC_CHARS:-24000}"
+# ~12000 chars tokenizes to ~4-6K tokens for this repetitive text (it's denser
+# than 4 chars/token), so a doc fits under MAX_MODEL_LEN and prefix_tree's half
+# (~25 docs) fits the ~170K-token cache while round_robin's full 50 don't.
+DOC_CHARS="${DOC_CHARS:-12000}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"   # headroom so a big doc is never rejected
 TTFT_N="${TTFT_N:-600}"            # measurement requests (keep > n_docs for revisits)
 WARMUP_N="${WARMUP_N:-150}"        # pre-populate the cache to steady state
 PIN_VERSIONS="${PIN_VERSIONS:-1}"
@@ -65,7 +69,7 @@ start_vllm() {
         --host 127.0.0.1 --port "$port" \
         --enable-prefix-caching \
         --gpu-memory-utilization "$GPU_MEM_UTIL" \
-        --max-model-len 8192 \
+        --max-model-len "$MAX_MODEL_LEN" \
         > "$LOG_DIR/$logname.log" 2>&1 &
     echo $!
 }
