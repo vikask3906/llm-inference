@@ -224,7 +224,9 @@ Prefix-aware routing ≈ **2.4× the cache hit rate** while keeping load balance
 the est-TTFT cutoff holds balance even under hot-document skew.
 
 Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
-`docker compose up --build` then `python bench/loadtest.py --strategy prefix_tree`.
+`python bench/fairness_sim.py` · `docker compose up --build` then
+`python bench/loadtest.py --strategy prefix_tree` and open the **Grafana**
+dashboard at `localhost:3000` (Prometheus at `localhost:9090`).
 
 ---
 
@@ -305,9 +307,9 @@ of the abuser — the core fairness property.
 
 ## 13. Roadmap (Phase 2+)
 - Real **vLLM** on ≥2 cheap cloud GPUs; fit the bilinear cost model from timings.
-- Observability: Prometheus `/metrics` ✓ and OpenTelemetry tracing ✓ (per-request
-  spans, OTLP-exportable to Jaeger); next: Grafana dashboard (TTFT + hit rate vs
-  NGINX round-robin) and Prometheus-format scraping of backends.
+- Observability: Prometheus `/metrics` ✓, OpenTelemetry tracing ✓, and a
+  provisioned **Grafana dashboard** ✓ (`docker compose up` → Grafana :3000,
+  Prometheus :9090); next: a vs-NGINX round-robin comparison panel.
 - **Rust** hot-path rewrite with profiled latency/throughput before/after.
 - COW/epoch reclamation in the tree (path compression is implemented ✓).
 - **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its
