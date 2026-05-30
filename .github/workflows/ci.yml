@@ -33,3 +33,6 @@ jobs:
 
       - name: HTTP end-to-end (smoke)
         run: python bench/e2e_inproc.py
+
+      - name: Fairness demo (smoke)
+        run: python bench/fairness_sim.py
