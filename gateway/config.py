@@ -44,6 +44,11 @@ class Config:
     # can't be loaded.
     use_bpe_hashing: bool = False
     tokenizer_model: str = "gpt2"           # any HF Hub repo with tokenizer.json
+    # When True, quota (TPS) + admission accounting count REAL tokens via the
+    # tokenizer instead of the len(prompt)//chars_per_token heuristic (which is
+    # off by 2-3x on code / non-English). Costs a tokenize pass per request, so
+    # opt-in; falls back to the heuristic if the tokenizer can't load.
+    token_accurate_accounting: bool = False
 
     # --- Extensions: predictive TTFT load scoring ---
     # When set, the gateway appends per-request (features, observed_ttft) to

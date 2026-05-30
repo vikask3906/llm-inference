@@ -26,6 +26,7 @@ from opentelemetry.trace import Status, StatusCode
 from .backends import BackendRegistry
 from .circuit import CircuitBreaker
 from .config import Config
+from .extensions.bpe_hashing import count_tokens_with_fallback
 from .extensions.lora import apply_adapter_config, lora_filter, parse_model_spec
 from .extensions.semantic_cache import SemanticCache, default_embedder
 from .extensions.speculative import race, top_k_backends
@@ -179,7 +180,12 @@ def extract_prompt(messages: list[dict]) -> str:
 
 
 def estimate_prompt_tokens(prompt: str) -> int:
-    return max(1, len(prompt) // cfg.chars_per_token)
+    # Accurate token count for quota/admission when enabled (falls back to the
+    # char heuristic if the tokenizer can't load); the cheap heuristic otherwise.
+    n, _ = count_tokens_with_fallback(prompt, cfg.chars_per_token,
+                                      cfg.tokenizer_model,
+                                      cfg.token_accurate_accounting)
+    return n
 
 
 def ratelimit_headers(tenant, adm) -> dict[str, str]:

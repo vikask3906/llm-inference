@@ -64,6 +64,26 @@ def tokenize_ids(prompt: str, tokenizer_name: str) -> list[int]:
     return list(enc.ids)
 
 
+def count_tokens(prompt: str, tokenizer_name: str) -> int:
+    """Exact BPE token count for `prompt`. Raises TokenizerUnavailable on
+    import/model-load failure."""
+    return len(tokenize_ids(prompt, tokenizer_name))
+
+
+def count_tokens_with_fallback(prompt: str, chars_per_token: int,
+                               tokenizer_name: str, use_tokenizer: bool
+                               ) -> tuple[int, str]:
+    """Token count for quota/admission accounting. Uses the real tokenizer when
+    asked (and available), else the char/token heuristic. Returns (count, mode)
+    where mode is "bpe" or "char" for metrics attribution. Always >= 1."""
+    if use_tokenizer:
+        try:
+            return max(1, count_tokens(prompt, tokenizer_name)), "bpe"
+        except TokenizerUnavailable:
+            pass
+    return max(1, len(prompt) // max(1, chars_per_token)), "char"
+
+
 def _hash_block(prev: int, ids: list[int]) -> int:
     h = _FNV_OFFSET
     for b in prev.to_bytes(8, "little"):

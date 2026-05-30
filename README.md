@@ -132,7 +132,9 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 - **Multi-tenant fairness** — per-tenant RPS + TPS token buckets (OpenAI RPM+TPM
   style) + in-flight caps, `429` with `Retry-After`, and per-tenant prefix
   isolation (routing seed + backend `cache_salt`) to close the cross-tenant TTFT
-  side channel.
+  side channel. Optional **token-accurate accounting** (`GW_TOKEN_ACCURATE_ACCOUNTING`)
+  counts real tokenizer tokens for quota/admission instead of the `chars/4`
+  heuristic (which is off by 2-3× on code / non-English).
 - **Observability** — structured JSON logs (request_id + trace_id), Prometheus
   `/metrics`, OpenTelemetry traces, and a provisioned Grafana dashboard.
 - **RAG-aware routing** — structured RAG payloads are canonicalized (deduped,
@@ -168,7 +170,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 247 tests
+python -m pytest -q            # 252 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
