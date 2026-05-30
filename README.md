@@ -8,9 +8,9 @@ so a cluster of LLM servers reuses cache instead of recomputing it. A standalone
 platform-agnostic take on Google's GKE Inference Gateway.
 
 > **~2.4× the prefix-cache hit rate of round-robin** (99% vs 40%) while keeping
-> load balanced — **validated on real vLLM + A40 GPUs: 10.5% lower mean TTFT,
-> 23.5% lower p95 TTFT** — plus fault tolerance, multi-tenant fairness, and full
-> observability (logs + metrics + traces).
+> load balanced — **validated on real vLLM + 2× A40 GPUs: 53% lower mean TTFT at
+> low load and +10 pp vLLM cache hit rate** — plus fault tolerance, multi-tenant
+> fairness, and full observability (logs + metrics + traces).
 
 ---
 
@@ -60,17 +60,19 @@ tenant stays within quota (same total budget):
 | added latency (c=1) | +3.8 ms | **+0.8 ms** | ~4.5× lower |
 
 **Real-vLLM GPU validation** — 2× NVIDIA A40, Qwen2.5-1.5B-Instruct, vLLM 0.7.3
-with prefix caching, KV capped to force cache pressure (30 docs × 12 KB, n=600,
-c=8); TTFT measured client-side (first SSE byte):
+with prefix caching, KV capped to force cache pressure (30 docs × 12 KB, n=600
+per point, concurrency swept); TTFT measured client-side (first SSE byte):
 
-| metric | round-robin | **prefix-tree (this)** | improvement |
+| concurrency | round-robin TTFT mean | **prefix-tree (this)** | improvement |
 |---|---|---|---|
-| TTFT mean | 216.6 ms | **193.8 ms** | **−10.5%** |
-| TTFT p95 | 740.1 ms | **566.5 ms** | **−23.5%** |
-| avg prefix-match blocks | 0.0 | **158.3** | routing affinity works |
+| **c = 1** | 166.4 ms | **77.4 ms** | **−53%** |
+| c = 8 | 309.7 ms | 304.3 ms | −2% (tied) |
+| c = 32 | 893.1 ms | 935.9 ms | +5% mean / **−9% p95** |
 
-Conservative result (mild pressure, ample A40 bandwidth); gap widens on smaller
-GPUs or larger working sets — see **[docs/BENCHMARKS.md §D](docs/BENCHMARKS.md)**.
+vLLM prefix-cache hit rate **62.6% → 72.6% (+10 pp)**; avg prefix-match blocks
+**0 → 166** (routing affinity confirmed). The win is largest at low load where
+cache locality dominates, and is gracefully traded for load balance as
+concurrency rises — see **[docs/BENCHMARKS.md §D](docs/BENCHMARKS.md)**.
 
 Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 `python bench/fairness_sim.py`.
@@ -215,10 +217,11 @@ for a complete file-by-file account of everything implemented.
 
 ## Roadmap
 
-- Real **vLLM** on GPUs for the headline TTFT-reduction number — see
-  **[docs/GPU_RUNBOOK.md](docs/GPU_RUNBOOK.md)** for the step-by-step (one
-  command on a 2-GPU pod; ~$3 / ~30 min; every pitfall from the prior run
-  baked into the script).
+- Real **vLLM** on GPUs — **done ✓** (2× A40, −53% mean TTFT at low load, +10 pp
+  cache hit rate; see [Results](#results) and **[docs/BENCHMARKS.md §D](docs/BENCHMARKS.md)**).
+  Reproduce in one command on a 2-GPU pod via **[docs/GPU_RUNBOOK.md](docs/GPU_RUNBOOK.md)**.
+- Multi-replica gateway with **shared prefix state** (gossip or Redis-backed
+  radix tree) — the next big systems problem.
 - **Rust** hot-path rewrite ([`rust/`](rust/)): data-plane core + axum/reqwest
   streaming proxy done ✓ (20 core tests; e2e smoke-tested vs the mock backend);
   next port metrics/circuit/tenancy + the profiled before/after latency vs Python.
