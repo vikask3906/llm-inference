@@ -5,29 +5,31 @@ backend. Run on a single Windows machine; Rust binaries built `--release`.
 
 ## TL;DR
 
-Two Rust gateway flavors are reported below, on the same fast backend:
+Three Rust gateway flavors on the same fast backend:
 
-- **lean Rust** — routing + streaming only (the original hot-path port).
-- **parity Rust** — adds Prometheus metrics + circuit breaker + failover (matches
-  the Python gateway's per-request work; tenancy/structured logging still TODO).
+- **lean** — routing + streaming only (original hot-path port).
+- **parity (no logs)** — adds metrics + circuit breaker + failover + tenancy.
+- **full parity** — adds structured JSON logging (now matches every per-request
+  thing Python does, modulo OpenTelemetry tracing).
 
-| metric (c=64) | Python | lean Rust | **parity Rust** | parity ratio |
-|---|---|---|---|---|
-| throughput | 209 req/s | 16,651 req/s | **9,822 req/s** | **~47× higher** |
-| p99 latency under load | 399.51 ms | 7.38 ms | **13.50 ms** | **~30× lower** |
+| metric (c=64) | Python | lean Rust | parity (no logs) | **full parity** | ratio vs Python |
+|---|---|---|---|---|---|
+| throughput | 209 req/s | 16,651 | 9,822 | **10,922 req/s** | **~52× higher** |
+| p99 latency under load | 399.51 ms | 7.38 ms | 13.50 ms | **12.20 ms** | **~33× lower** |
 
-| metric (c=128) | Python | lean Rust | **parity Rust** | parity ratio |
-|---|---|---|---|---|
-| throughput | 212 req/s | 15,220 req/s | **9,213 req/s** | **~43× higher** |
-| p99 latency under load | 922.42 ms | 16.44 ms | **27.26 ms** | **~34× lower** |
+| metric (c=128) | Python | full parity Rust | ratio |
+|---|---|---|---|
+| throughput | 212 req/s | **10,283 req/s** | **~49× higher** |
+| p99 latency under load | 922.42 ms | **23.94 ms** | **~39× lower** |
 
 | metric (c=1) | Python | lean Rust |
 |---|---|---|
 | added latency (backend subtracted) | +3.8 ms | **+0.8 ms** (~4.5× lower) |
 
 The Rust hot path is a real, measured optimization — not just lower per-request
-overhead, but a fundamentally different throughput regime under load. The
-parity port narrows the gap (extra per-request work) but the win stays large.
+overhead, but a fundamentally different throughput regime under load. **Full
+parity Rust** retains a ~50× throughput / ~33× p99 advantage at the same
+per-request work as the Python gateway.
 
 ## Methodology
 
@@ -75,28 +77,33 @@ runs, so any gateway-specific overhead shows up cleanly.
 → Rust gateway sustains **~70–80× the throughput** of the Python gateway with
 **~50–60× lower p99**, against the same fast backend.
 
-## Results — C. parity Rust gateway (metrics + circuit + failover)
+## Results — C. full-parity Rust gateway
 
-Same setup; the Rust gateway now emits per-request Prometheus metrics (counters,
-gauges, latency histogram) and runs the circuit-breaker + failover loop just
-like the Python gateway.
+The Rust gateway now emits per-request Prometheus metrics, runs the circuit
+breaker + failover loop, applies tenancy admission with `Retry-After` /
+`X-RateLimit-*` headers, injects per-tenant `cache_salt` for prefix isolation,
+and writes a structured JSON log line per request — i.e., everything the Python
+gateway does on every request, *except* OpenTelemetry tracing.
 
-| target | conc | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) |
-|---|---|---|---|---|---|---|
-| parity Rust gateway | 64 | 9,822 | 6.21 | 10.89 | 13.50 | 6.43 |
-| parity Rust gateway | 128 | 9,213 | 13.26 | 22.21 | 27.26 | 13.70 |
+| target | conc | log level | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) |
+|---|---|---|---|---|---|---|---|
+| full-parity Rust | 64  | WARN | 10,922 | 5.49 | 9.73 | 12.20 | 5.77 |
+| full-parity Rust | 128 | WARN | 10,283 | 11.83 | 19.52 | 23.94 | 12.24 |
+| full-parity Rust | 64  | INFO | 10,389 | 5.87 | 9.49 | 11.74 | 6.07 |
+| full-parity Rust | 128 | INFO | 10,271 | 11.89 | 19.67 | 24.03 | 12.30 |
 
-The added per-request work costs ~40% throughput vs the lean port (16.6k →
-9.8k req/s) — expected, and the parity gap vs Python stays huge (~47×).
+Logging at INFO costs almost nothing here because stdout is fast / redirected;
+in a real deployment writing to a log aggregator the cost rises.
 
 ## Honest caveats
 
-- **Still ahead of full parity:** the Rust gateway doesn't yet have
-  tenancy/rate-limiting or structured JSON logging. Adding those will narrow
-  the gap a bit more; the architecture conclusion (Python's GIL + per-request
-  Python work is the limiter, not the algorithm) holds either way.
-- **Single-machine numbers.** The load generator, gateway, and backend share
-  one host. Absolute throughput would be higher on separate machines, but the
+- **Full parity except OpenTelemetry tracing.** The Rust gateway now matches
+  the Python gateway's per-request work: metrics + circuit + failover +
+  tenancy + structured JSON logging. OTel tracing is the one remaining feature
+  not yet ported, but it's no-op when unconfigured in Python too — so the
+  benchmarks above are apples-to-apples for a realistic deployment.
+- **Single-machine numbers.** Load generator, gateway, and backend share one
+  host. Absolute throughput would be higher on separate machines, but the
   *relative* gap between Python and Rust gateways is the meaningful signal.
 
 ## Reproduce
