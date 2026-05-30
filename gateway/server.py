@@ -12,6 +12,7 @@ predictable sub-2ms added latency; the control loop stays in Python.
 
 import asyncio
 import contextlib
+import hmac
 import math
 import os
 import time
@@ -333,6 +334,96 @@ async def autoscale_endpoint():
         "est_wait_ms": round(d.est_wait_ms, 2),
         "blocked_by_cooldown": d.blocked_by_cooldown,
     })
+
+
+# --- Control-plane admin API ------------------------------------------------
+# Disabled until GW_ADMIN_TOKEN is set; then every /admin/* call must present it
+# as `Authorization: Bearer <token>` or `X-Admin-Token: <token>`.
+
+def _admin_authorized(request: Request) -> bool:
+    token = cfg.admin_token
+    if not token:
+        return False                          # admin surface not enabled
+    presented = request.headers.get("x-admin-token") or ""
+    if not presented:
+        from .auth import extract_bearer
+        presented = extract_bearer(request.headers) or ""
+    return bool(presented) and hmac.compare_digest(presented, token)
+
+
+def _admin_guard(request: Request):
+    """Return a 403 JSONResponse if not authorized, else None."""
+    if _admin_authorized(request):
+        return None
+    reason = "admin disabled (set GW_ADMIN_TOKEN)" if not cfg.admin_token \
+        else "invalid or missing admin token"
+    return JSONResponse({"error": {"message": reason, "type": "forbidden"}},
+                        status_code=403)
+
+
+def _backend_view(b) -> dict:
+    return {
+        "id": b.id,
+        "url": b.url,
+        "healthy": b.healthy,
+        "draining": b.draining,
+        "inflight": load.inflight.get(b.id, 0),
+        "kv_usage": round(load.kv_usage.get(b.id, 0.0), 4),
+        "circuit": breaker.state(b.id),
+        "held_blocks": tree.held_blocks(b.id),
+    }
+
+
+@app.get("/admin/backends")
+async def admin_list_backends(request: Request):
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    return {"backends": [_backend_view(b) for b in registry.all()]}
+
+
+@app.post("/admin/backends/{backend_id}/drain")
+async def admin_drain(backend_id: str, request: Request):
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    if not registry.set_draining(backend_id, True):
+        return JSONResponse({"error": f"unknown backend {backend_id!r}"}, status_code=404)
+    metrics.inc_counter("gateway_admin_drain_total", help="Admin drain actions",
+                        backend=backend_id, action="drain")
+    log_event(log, "admin", action="drain", backend=backend_id)
+    return {"backend": backend_id, "draining": True}
+
+
+@app.post("/admin/backends/{backend_id}/undrain")
+async def admin_undrain(backend_id: str, request: Request):
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    if not registry.set_draining(backend_id, False):
+        return JSONResponse({"error": f"unknown backend {backend_id!r}"}, status_code=404)
+    metrics.inc_counter("gateway_admin_drain_total", help="Admin drain actions",
+                        backend=backend_id, action="undrain")
+    log_event(log, "admin", action="undrain", backend=backend_id)
+    return {"backend": backend_id, "draining": False}
+
+
+@app.get("/admin/state")
+async def admin_state(request: Request):
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    state = {
+        "strategy": cfg.strategy,
+        "backends": [_backend_view(b) for b in registry.all()],
+        "routable": registry.ids_for(cfg.default_model),
+    }
+    if cluster is not None:
+        state["cluster"] = {"replica_id": cluster.replica_id,
+                            "peers": cluster.fleet.peers(),
+                            "published": cluster.published,
+                            "applied_remote": cluster.applied_remote}
+    return state
 
 
 @app.post("/v1/dag/schedule")

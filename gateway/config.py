@@ -91,6 +91,10 @@ class Config:
     # OFF so an unconfigured gateway stays open (dev / behind a service mesh).
     require_auth: bool = False
     api_keys: str = ""                      # extra valid keys (comma-sep) not tied to a tenant
+    # Control-plane admin API (drain backends, inspect routing). The /admin/*
+    # endpoints are DISABLED until this is set, then require it as a bearer/
+    # X-Admin-Token. Empty = no admin surface exposed (secure default).
+    admin_token: str = ""
 
     # --- Multi-tenancy / fairness ---
     rate_limit_enabled: bool = False        # enforcement is opt-in (needs tenants/tiers)

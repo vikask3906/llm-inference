@@ -11,7 +11,7 @@ from .config import Config
 
 
 class Backend:
-    __slots__ = ("id", "url", "model", "healthy", "adapters")
+    __slots__ = ("id", "url", "model", "healthy", "draining", "adapters")
 
     def __init__(self, id: str, url: str, model: str,
                  adapters: set[str] | None = None) -> None:
@@ -19,6 +19,10 @@ class Backend:
         self.url = url
         self.model = model
         self.healthy = True
+        # Operator-controlled maintenance flag: a draining backend stays alive and
+        # finishes its in-flight work but receives NO new requests (excluded from
+        # routing). Distinct from `healthy`, which the health scrape owns.
+        self.draining = False
         # LoRA adapters loaded on this backend. Empty set = base only.
         self.adapters: set[str] = set(adapters) if adapters else set()
 
@@ -44,8 +48,21 @@ class BackendRegistry:
         if b:
             b.healthy = healthy
 
+    def get(self, backend_id: str) -> Backend | None:
+        return self._by_id.get(backend_id)
+
+    def set_draining(self, backend_id: str, draining: bool) -> bool:
+        """Mark a backend for maintenance. Returns False if it doesn't exist."""
+        b = self._by_id.get(backend_id)
+        if not b:
+            return False
+        b.draining = draining
+        return True
+
     def ids_for(self, model: str | None) -> list[str]:
+        # Exclude draining backends so new requests never route to a node under
+        # maintenance; in-flight requests already dispatched there finish normally.
         return [
             b.id for b in self._by_id.values()
-            if b.healthy and (model is None or model == b.model)
+            if b.healthy and not b.draining and (model is None or model == b.model)
         ]

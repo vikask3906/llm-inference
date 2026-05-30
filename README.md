@@ -137,6 +137,11 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   heuristic (which is off by 2-3× on code / non-English).
 - **Observability** — structured JSON logs (request_id + trace_id), Prometheus
   `/metrics`, OpenTelemetry traces, and a provisioned Grafana dashboard.
+- **Control plane** — token-guarded `/admin/*` API to **drain a backend** for
+  maintenance (stops new routing to it while in-flight work finishes, without
+  killing it), restore it, and inspect live routing state (per-backend health /
+  draining / in-flight / KV usage / circuit / held prefix blocks). Enabled by
+  `GW_ADMIN_TOKEN` (off by default).
 - **RAG-aware routing** — structured RAG payloads are canonicalized (deduped,
   sorted chunks → identical prefix), routed by chunk-affinity (set-overlap) to
   the backend already holding the most chunks. Opt-in via `GW_RAG_ENABLED`.
@@ -170,7 +175,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 252 tests
+python -m pytest -q            # 258 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
