@@ -149,6 +149,12 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 - **Autoscaling** — SLO-driven replica planner (Erlang-C + utilization target,
   anti-flapping cooldowns). Emits scaling recommendations via `/autoscale` and
   Prometheus metrics. Opt-in via `GW_AUTOSCALE_ENABLED`.
+- **Horizontal scaling** — run multiple gateway replicas behind a load balancer
+  and they **share prefix-routing state**: each replica keeps its local radix
+  tree for fast longest-prefix match, replicates tree *mutations* over a bus
+  (Redis pub/sub), and converges so a request can hit any replica and still
+  route to the backend holding the cached prefix. Reads stay local; only writes
+  fan out. Opt-in via `GW_CLUSTER_ENABLED` — see [Horizontal scaling](#horizontal-scaling-multi-replica).
 - **OpenAI-compatible** — `POST /v1/chat/completions` with SSE streaming.
 
 ## Quickstart
@@ -156,7 +162,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 222 tests
+python -m pytest -q            # 232 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
@@ -180,6 +186,27 @@ curl -N http://localhost:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"mock-model","messages":[{"role":"user","content":"hello"}],"stream":true}'
 ```
+
+### Horizontal scaling (multi-replica)
+
+A single gateway holds its radix tree in-process — a second replica would route
+blind. With `GW_CLUSTER_ENABLED`, replicas **share prefix-routing state**: each
+keeps its local tree for fast matching and replicates tree *mutations*
+(insert / backend-removal) over Redis pub/sub, converging so a request can land
+on **any** replica and still route to the backend holding the cached prefix.
+
+```bash
+# two gateway replicas behind an nginx LB, sharing state via Redis:
+docker compose -f docker-compose.cluster.yml up --build
+# load balancer -> http://localhost:8080   (round-robins gw1 / gw2)
+python bench/loadtest.py --url http://localhost:8080 --duration 60
+```
+
+Design: writes fan out, reads stay local (the hot path adds only a buffered,
+non-blocking publish; a background loop drains peers' mutations off the request
+path). Eventual consistency — each replica's tree becomes the union of the
+fleet's inserts, which models the backend's real cache better than any single
+replica's view. See [`gateway/cluster/`](gateway/cluster/).
 
 ## Project layout
 
@@ -220,8 +247,10 @@ for a complete file-by-file account of everything implemented.
 - Real **vLLM** on GPUs — **done ✓** (2× A40, −53% mean TTFT at low load, +10 pp
   cache hit rate; see [Results](#results) and **[docs/BENCHMARKS.md §D](docs/BENCHMARKS.md)**).
   Reproduce in one command on a 2-GPU pod via **[docs/GPU_RUNBOOK.md](docs/GPU_RUNBOOK.md)**.
-- Multi-replica gateway with **shared prefix state** (gossip or Redis-backed
-  radix tree) — the next big systems problem.
+- Multi-replica gateway with **shared prefix state** — **done ✓**
+  ([`gateway/cluster/`](gateway/cluster/), `docker-compose.cluster.yml`):
+  Redis-replicated radix-tree mutations, local reads. Next: replicate load/
+  circuit state too, and a CRDT/gossip transport to drop the Redis dependency.
 - **Rust** hot-path rewrite ([`rust/`](rust/)): data-plane core + axum/reqwest
   streaming proxy done ✓ (20 core tests; e2e smoke-tested vs the mock backend);
   next port metrics/circuit/tenancy + the profiled before/after latency vs Python.

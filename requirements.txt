@@ -9,6 +9,9 @@ opentelemetry-sdk==1.34.1
 tokenizers>=0.20,<1.0
 # Semantic cache and TTFT predictor math.
 numpy>=1.26
+# Multi-replica prefix-state replication (only needed for GW_CLUSTER_TRANSPORT=redis;
+# the in-memory transport and all tests need no external package).
+redis>=5.0
 # Optional (only needed when actually serving semantic cache / training models):
 #   sentence-transformers>=3.0
 #   joblib>=1.4

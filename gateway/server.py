@@ -33,6 +33,7 @@ from .extensions.ttft_predictor import Observation, ObservationLogger, TTFTPredi
 from .load_tracker import LoadTracker
 from .logging_setup import configure_logging, log_event
 from .metrics import BLOCK_BUCKETS, MetricsCollector
+from .cluster import ClusterConfig, ClusterCoordinator, make_bus
 from .radix_tree import RadixTree
 from .hashing import block_hashes as _block_hashes
 from .router import RouteResult, Router
@@ -140,6 +141,18 @@ _autoscale_last_decision = None       # most recent ScalingDecision
 _autoscale_last_scale_up = float("-inf")
 _autoscale_last_scale_down = float("-inf")
 
+# Multi-replica prefix-state replication (opt-in): when enabled, each replica
+# publishes its radix-tree mutations to a shared bus and applies peers' mutations
+# in a background loop, so prefix-aware routing works across a horizontally
+# scaled gateway fleet. No-op (single-replica behaviour) when disabled.
+cluster_cfg = ClusterConfig.from_env()
+cluster = None
+if cluster_cfg.enabled:
+    try:
+        cluster = ClusterCoordinator(tree, make_bus(cluster_cfg), cluster_cfg.replica_id)
+    except Exception:
+        cluster = None            # a bus init failure must not break the gateway
+
 
 def _trace_id(span) -> str | None:
     tid = span.get_span_context().trace_id
@@ -193,6 +206,8 @@ async def scrape_loop(client: httpx.AsyncClient) -> None:
                 registry.set_health(b.id, False)
                 breaker.record_failure(b.id)
                 tree.remove_backend(b.id)
+                if cluster is not None:
+                    cluster.publish_remove(b.id)        # tell peers it's gone
 
         # Autoscale planner: compute offered RPS and emit a scaling recommendation.
         if autoscale_cfg.enabled:
@@ -222,16 +237,38 @@ async def scrape_loop(client: httpx.AsyncClient) -> None:
 
         await asyncio.sleep(2.0)
 
+
+async def cluster_sync_loop() -> None:
+    """Drain peers' radix-tree mutations into the local tree, off the hot path."""
+    interval = max(0.02, cluster_cfg.sync_interval_ms / 1000.0)
+    while True:
+        try:
+            applied = cluster.sync()
+            if applied:
+                metrics.inc_counter("gateway_cluster_events_applied_total",
+                                    help="Remote prefix mutations applied from peers",
+                                    value=applied)
+        except Exception:
+            pass            # a transient bus error must never stop routing
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.client = httpx.AsyncClient()
-    task = asyncio.create_task(scrape_loop(app.state.client))
+    tasks = [asyncio.create_task(scrape_loop(app.state.client))]
+    if cluster is not None:
+        tasks.append(asyncio.create_task(cluster_sync_loop()))
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if cluster is not None:
+            cluster.close()
         await app.state.client.aclose()
 
 
@@ -576,6 +613,8 @@ async def chat_completions(request: Request):
             cm = outcome.winner_cm
             upstream = outcome.winner_response
             tree.insert(r.hashes, r.backend_id)
+            if cluster is not None:
+                cluster.publish_insert(r.hashes, r.backend_id)   # fan out to peers
             load.on_dispatch(r.backend_id, r.tokens)
             metrics.inc_counter("gateway_speculative_races_total",
                                 help="Speculative races dispatched", k=str(len(candidates)))
@@ -595,6 +634,8 @@ async def chat_completions(request: Request):
             # Reflect the decision in shared state BEFORE connecting, so concurrent
             # requests for the same prefix converge instead of duplicating cache.
             tree.insert(r.hashes, r.backend_id)
+            if cluster is not None:
+                cluster.publish_insert(r.hashes, r.backend_id)   # fan out to peers
             load.on_dispatch(r.backend_id, r.tokens)
             cm = client.stream("POST", f"{registry.url(r.backend_id)}/v1/chat/completions", json=body)
             try:

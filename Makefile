@@ -16,6 +16,12 @@ smoke:  ## one streaming request against a running gateway
 	curl -N $(GW)/v1/chat/completions -H 'content-type: application/json' \
 		-d '{"model":"mock-model","messages":[{"role":"user","content":"hello"}],"stream":true}'
 
+cluster-demo:  ## 2 gateway replicas behind an LB sharing prefix state via Redis
+	docker compose -f docker-compose.cluster.yml up --build
+
+cluster-down:  ## tear the cluster stack down
+	docker compose -f docker-compose.cluster.yml down -v
+
 down:  ## tear the stack down (incl. volumes)
 	docker compose down -v
 
