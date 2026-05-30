@@ -139,7 +139,8 @@ docs/DESIGN.md  full design doc (architecture, trade-offs, roadmap)
 
 See **[docs/DESIGN.md](docs/DESIGN.md)** for the architecture, the routing
 algorithm (radix tree, eviction model, cost function), trade-offs, failure
-handling, and the Phase-2 roadmap.
+handling, and the Phase-2 roadmap — and **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)**
+for a complete file-by-file account of everything implemented.
 
 ## Roadmap
 
