@@ -71,6 +71,8 @@ Each extension ships with its own before/after benchmark, written up in
 | **DAG scheduler** | `bench/dag_bench.py` | **3.0×** lower makespan, **3.0×** higher prefix-cache hit rate vs round-robin on a multi-chain workflow (5 chains × 4 nodes × 16-block shared context) — [`DAG_RESULTS.md`](docs/benchmarks/DAG_RESULTS.md) |
 | **RAG chunk-affinity** | `bench/rag_bench.py` | **60% chunk-cache hit rate** vs round-robin's 50% on a multi-tenant RAG workload (3 disjoint sub-corpora, 600 chunks, Zipf α=1.2), **20% lower** per-request prefill cost — [`RAG_RESULTS.md`](docs/benchmarks/RAG_RESULTS.md) |
 | **Admission control** | `bench/admission_bench.py` | At **2× offered load**: baseline collapses to **2% gold-tier SLO compliance**, admission keeps gold at **100%** (bronze shed to 29% served, by design) — [`ADMISSION_RESULTS.md`](docs/benchmarks/ADMISSION_RESULTS.md) |
+| **Disaggregation** | `bench/disagg_bench.py` | Adaptive prefill/decode split is the **lower-latency envelope** — co-locates when idle (0% split, matches colocate), splits under load (**33% lower mean latency than colocate-only** at 8× load) — [`DISAGG_RESULTS.md`](docs/benchmarks/DISAGG_RESULTS.md) |
+| **Multimodal** | `bench/multimodal_bench.py` | Media-affinity hits **90% image-cache** vs round-robin's 81%, while staying **11× more load-balanced** than consistent-hash (CoV 0.01 vs 0.11) — best of both — [`MULTIMODAL_RESULTS.md`](docs/benchmarks/MULTIMODAL_RESULTS.md) |
 
 ## How it works
 
