@@ -106,6 +106,97 @@ in a real deployment writing to a log aggregator the cost rises.
   host. Absolute throughput would be higher on separate machines, but the
   *relative* gap between Python and Rust gateways is the meaningful signal.
 
+## Results — D. Real vLLM on RunPod (GPU validation run)
+
+**Goal:** prove the gateway routes correctly against real vLLM and capture an
+end-to-end real-GPU number. **Outcome: pipeline validated; routing observable in
+the backend distribution; cache-hit rate inconclusive in this regime (workload
+too small for vLLM's available KV space — see honest read below).**
+
+### Setup
+- **Hardware:** RunPod pod, 2× NVIDIA A40 (48 GB each) + 100 GB RAM + 16 vCPU.
+- **Model:** `Qwen/Qwen2.5-0.5B-Instruct` served by **vLLM 0.7.3** (one
+  process per GPU, `--enable-prefix-caching`, `--gpu-memory-utilization 0.85`,
+  served as `mock-model` via `--served-model-name`).
+- **Networking:** RunPod HTTP proxy exposes `9001` and `9002`. The **Python
+  gateway** runs on the laptop, points at the two HTTPS proxy URLs.
+- **Workload:** `bench/loadtest.py` (15 docs, ~6 KB each, shared system prefix,
+  unique question per request), n=600, concurrency=16.
+
+### Backend distribution (routing correctness — works)
+
+| strategy | b0 | b1 |
+|---|---|---|
+| `prefix_tree` | 314 | 286 |
+| `round_robin` | 300 | 300 |
+
+`prefix_tree` shows a deliberate skew based on prefix affinity; `round_robin`
+is perfectly even. Both confirm the gateway is dispatching as designed.
+
+### vLLM prefix-cache hit-rate gauge (cache-saturated regime — inconclusive)
+
+`vllm:gpu_prefix_cache_hit_rate` (cumulative gauge across both backends),
+sampled before/between/after the two 600-request runs:
+
+| stage | b0 | b1 |
+|---|---|---|
+| baseline | 0.9867 | 0.9866 |
+| after `prefix_tree` | 0.9896 | 0.9893 |
+| after `round_robin` | 0.9914 | 0.9912 |
+
+Both strategies' incremental contribution lifts the gauge by tenths of a
+percent only, **because the workload's working set fits entirely in vLLM's
+KV cache on A40s** (~45 GB free VRAM each is dramatically more than 15 × ~1.5k
+tokens × ~16 KV per token). Once the cache is warm — which happens after a
+handful of requests on either strategy — both routing choices read from cache
+and saturate near ~99% hit rate. **Prefix routing's win is visible only under
+cache pressure**, which this workload doesn't create.
+
+(The deltas hint at a small `prefix_tree` advantage — +0.0029 vs +0.0018 on
+b0 — but the absolute movement is too small to claim a clean number from one
+cumulative gauge.)
+
+### Honest read
+
+- **Validated end-to-end:** laptop → Python gateway → HTTPS RunPod proxy →
+  vLLM 0.7.3 → SSE streamed back. Routing strategies switch correctly via the
+  `x-routing-strategy` header. `cache_salt` injection works. Health-scrape
+  loop talks to vLLM's `/health` (after a one-line gateway patch since vLLM's
+  `/metrics` is Prometheus text, not JSON like our mock).
+- **Cache-saturated regime:** the sim's 99% vs 40% gap (see Section 8 of
+  [`DESIGN.md`](DESIGN.md)) was generated under a 600-blocks-per-backend cap;
+  that pressure regime is what makes prefix routing matter. On A40s with this
+  small workload, both strategies live above 99%.
+- **To make the GPU benchmark discriminate**, the workload needs to exceed
+  vLLM's KV cache — see "Future runs" below.
+
+### Lessons captured for the next GPU session
+
+1. **Use `nohup`** for vLLM (or `tmux`) — closing a web-terminal tab kills the
+   foreground process (got bitten by this).
+2. **Pin versions** matching the RunPod image's CUDA driver: `torch 2.5.1+cu121`
+   ← `vllm 0.7.3` ← `transformers 4.49.0` (vLLM 0.21 wanted a too-new CUDA).
+3. **Real vLLM's `/health` (not `/metrics`)** is what to scrape for liveness;
+   `/metrics` is Prometheus text. Already patched in `gateway/server.py`.
+4. **vLLM doesn't emit `x-prefix-cache-hit`** in response headers; the
+   loadtest's header-based hit-rate column will read 0% against real vLLM.
+   Use `vllm:gpu_prefix_cache_hit_rate` from `/metrics` directly, *or* compare
+   end-to-end latency, *or* restart vLLM between runs to read isolated gauges.
+5. **Pick a workload that exceeds the KV cache** to make routing matter:
+   `N_DOCS = 200+`, `DOC_CHARS = 24000+` in `bench/loadtest.py`, or run on a
+   smaller GPU (`RTX 2000 Ada` at 16 GB cache, ~$0.48/hr) where the same
+   workload creates pressure.
+
+### Future runs — what to try next time
+
+- **Larger workload**: bump `N_DOCS` to ~200 and `DOC_CHARS` to ~24 KB so the
+  working set is multi-GB and forces evictions.
+- **Cold-cache compare**: restart vLLM between strategies and read the gauge
+  cleanly per-run.
+- **Latency-based metric**: extend `loadtest.py` to record per-request
+  end-to-end time (or use `latency_bench.py`) — TTFT differences from real
+  prefill are the most discriminating signal.
+
 ## Reproduce
 
 ```bash

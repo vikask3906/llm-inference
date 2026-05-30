@@ -85,17 +85,18 @@ async def scrape_loop(client: httpx.AsyncClient) -> None:
     while True:
         for b in registry.all():
             try:
-                resp = await client.get(f"{b.url}/metrics", timeout=1.0)
-                data = resp.json()
-                load.update_scraped(b.id, float(data.get("kv_usage", 0.0)))
-                registry.set_health(b.id, True)
-                breaker.record_success(b.id)     # health probe drives recovery
+                resp = await client.get(f"{b.url}/health", timeout=3.0)
+                if resp.status_code == 200:
+                    registry.set_health(b.id, True)
+                    breaker.record_success(b.id)
+                else:
+                    registry.set_health(b.id, False)
+                    breaker.record_failure(b.id)
             except Exception:
                 registry.set_health(b.id, False)
                 breaker.record_failure(b.id)
-                tree.remove_backend(b.id)        # membership eviction
+                tree.remove_backend(b.id)
         await asyncio.sleep(2.0)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
