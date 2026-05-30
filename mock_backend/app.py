@@ -24,7 +24,7 @@ CFG = Config()
 
 
 def create_app(node_id: str = "mock", cap_blocks: int = 600,
-               prefill_s_per_block: float = 0.001) -> FastAPI:
+               prefill_s_per_block: float = 0.001, token_delay_s: float = 0.002) -> FastAPI:
     app = FastAPI()
     cache: "OrderedDict[int, bool]" = OrderedDict()
     state = {"inflight": 0}
@@ -77,7 +77,8 @@ def create_app(node_id: str = "mock", cap_blocks: int = 600,
                         "choices": [{"index": 0, "delta": {"content": tok}, "finish_reason": None}],
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
-                    await asyncio.sleep(0.002)
+                    if token_delay_s:
+                        await asyncio.sleep(token_delay_s)
                 yield b"data: [DONE]\n\n"
             finally:
                 state["inflight"] -= 1
@@ -96,4 +97,5 @@ app = create_app(
     node_id=os.environ.get("MOCK_NODE_ID", "mock"),
     cap_blocks=int(os.environ.get("MOCK_CAP_BLOCKS", "600")),
     prefill_s_per_block=float(os.environ.get("MOCK_PREFILL_S_PER_BLOCK", "0.001")),
+    token_delay_s=float(os.environ.get("MOCK_TOKEN_DELAY_S", "0.002")),
 )
