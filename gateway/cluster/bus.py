@@ -20,7 +20,7 @@ Two implementations:
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 
-from .events import PrefixEvent
+from .events import PrefixEvent, decode_event
 
 
 class ReplicationBus(ABC):
@@ -120,7 +120,7 @@ class RedisBus(ReplicationBus):
             if not data:
                 continue
             try:
-                ev = PrefixEvent.from_json(data)
+                ev = decode_event(data)
             except Exception:
                 continue
             if ev.origin != self._replica_id:

@@ -150,6 +150,7 @@ cluster = None
 if cluster_cfg.enabled:
     try:
         cluster = ClusterCoordinator(tree, make_bus(cluster_cfg), cluster_cfg.replica_id)
+        router.fleet = cluster.fleet   # router scores by fleet-wide (local+peer) load
     except Exception:
         cluster = None            # a bus init failure must not break the gateway
 
@@ -243,10 +244,16 @@ async def cluster_sync_loop() -> None:
     interval = max(0.02, cluster_cfg.sync_interval_ms / 1000.0)
     while True:
         try:
+            # Publish this replica's load + locally-shed backends, then drain peers'.
+            unhealthy = [b.id for b in registry.all()
+                         if breaker.state_code(b.id) == 2 or not b.healthy]
+            cluster.publish_load(dict(load.inflight), unhealthy)
             applied = cluster.sync()
+            metrics.set_gauge("gateway_cluster_peers", cluster.fleet.peers(),
+                              help="Number of peer gateway replicas seen")
             if applied:
                 metrics.inc_counter("gateway_cluster_events_applied_total",
-                                    help="Remote prefix mutations applied from peers",
+                                    help="Remote mutations applied from peers",
                                     value=applied)
         except Exception:
             pass            # a transient bus error must never stop routing

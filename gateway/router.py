@@ -31,15 +31,26 @@ class RouteResult:
 
 class Router:
     def __init__(self, cfg: Config, tree: RadixTree, load: LoadTracker,
-                 predictor: TTFTPredictor | None = None):
+                 predictor: TTFTPredictor | None = None, fleet=None):
         self.cfg = cfg
         self.tree = tree
         self.load = load
         self._rr = 0
         self.predictor = predictor
+        # Optional fleet-load view (gateway.cluster.FleetLoadView). When set, the
+        # cost function scores by local + peers' in-flight, so a backend busy on
+        # another replica is treated as busy here too. None -> single-replica.
+        self.fleet = fleet
 
     def _candidates(self, backends: list[str]) -> list[str]:
         return backends
+
+    def _inflight(self, backend_id: str) -> int:
+        """Effective in-flight = this replica's + peers' (fleet-wide when clustered)."""
+        n = self.load.inflight[backend_id]
+        if self.fleet is not None:
+            n += self.fleet.peer_inflight(backend_id)
+        return n
 
     def choose(self, prompt: str, backends: list[str], strategy: str | None = None,
                seed: int = 0) -> RouteResult:
@@ -73,10 +84,13 @@ class Router:
         saturated_fallback = None
         for b in cands:
             # --- guardrails: hard saturation cutoff (affinity yields to load) ---
-            if self.load.kv_usage[b] > self.cfg.kv_pressure_cutoff or \
-               self.load.inflight[b] > self.cfg.max_inflight:
+            # A backend a PEER has shed (circuit-open there) is treated as
+            # saturated here too, so a fleet-wide-bad node is avoided everywhere.
+            peer_bad = self.fleet is not None and self.fleet.peer_unhealthy(b)
+            if peer_bad or self.load.kv_usage[b] > self.cfg.kv_pressure_cutoff or \
+               self._inflight(b) > self.cfg.max_inflight:
                 if saturated_fallback is None or \
-                   self.load.inflight[b] < self.load.inflight[saturated_fallback]:
+                   self._inflight(b) < self._inflight(saturated_fallback):
                     saturated_fallback = b
                 continue
             m_blocks = match.get(b, 0)
@@ -92,8 +106,8 @@ class Router:
         # a large real affinity still keeps a single backend the sole winner.
         min_ttft = min(s[0] for s in scored)
         good = [(b, m) for (ttft, b, m) in scored if ttft <= min_ttft + self.cfg.hysteresis_ms]
-        min_load = min(self.load.inflight[b] for b, _ in good)
-        tied = [(b, m) for (b, m) in good if self.load.inflight[b] == min_load]
+        min_load = min(self._inflight(b) for b, _ in good)
+        tied = [(b, m) for (b, m) in good if self._inflight(b) == min_load]
         b, m_blocks = tied[self._rr % len(tied)]
         self._rr += 1
         return RouteResult(b, hashes, tokens, m_blocks, mode)
@@ -103,13 +117,13 @@ class Router:
         uncached = max(0, tokens - cached_tokens)
         # MVP: linear prefill. Phase 2: a*(N-m)*N + b*(N-m) fitted from real timings.
         prefill_ms = self.cfg.prefill_ms_per_token * uncached
-        queue_ms = self.load.inflight[backend_id] * self.cfg.service_ms_per_request
+        queue_ms = self._inflight(backend_id) * self.cfg.service_ms_per_request
         static_ttft = prefill_ms + queue_ms
         if self.predictor is None or not self.predictor.available():
             return static_ttft
         feats = features_for(prompt_tokens=tokens, match_blocks=match_blocks,
                              block_tokens=self.cfg.block_tokens,
-                             inflight=self.load.inflight[backend_id],
+                             inflight=self._inflight(backend_id),
                              kv_usage=self.load.kv_usage[backend_id],
                              backend_id=backend_id)
         return blended_ttft(static_ttft, self.predictor.predict(feats),
