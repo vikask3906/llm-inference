@@ -33,8 +33,47 @@ class Config:
     hysteresis_ms: float = 5.0              # alt must beat current best by this margin
 
     # --- Routing ---
-    # round_robin | consistent_hash | prefix_tree
+    # round_robin | consistent_hash | prefix_tree | speculative
     strategy: str = "prefix_tree"
+
+    # --- Extensions: BPE token-ID prefix hashing ---
+    # When True, hash blocks of real BPE token IDs instead of raw character
+    # blocks. Matches how vLLM keys its KV cache, so prefixes that tokenize
+    # identically but render slightly differently (whitespace, casing) hit the
+    # same cache entry. Falls back to char-based hashing if the tokenizer
+    # can't be loaded.
+    use_bpe_hashing: bool = False
+    tokenizer_model: str = "gpt2"           # any HF Hub repo with tokenizer.json
+
+    # --- Extensions: predictive TTFT load scoring ---
+    # When set, the gateway appends per-request (features, observed_ttft) to
+    # a JSONL file for offline training. When a trained model exists at
+    # ttft_model_path, the router blends its prediction with the static
+    # linear-prefill formula (weight=0 -> pure static, 1 -> pure learned).
+    ttft_observations_path: str = ""        # empty disables logging
+    ttft_model_path: str = ""               # empty disables prediction
+    ttft_predictor_weight: float = 0.5      # blend weight in [0, 1]
+
+    # --- Extensions: speculative / shadow routing ---
+    # When strategy=="speculative", dispatch the request to the top-K candidates
+    # in parallel and return the first response. Cuts tail latency at a
+    # K-multiplicative GPU cost; only enable when p99 dominates the SLO.
+    speculative_k: int = 2
+
+    # --- Extensions: LoRA-aware routing ---
+    # "b0:adapter1,adapter2;b1:adapter3" -- declares which LoRA adapters are
+    # loaded on which backend. Request model field "base:adapter" routes only
+    # to backends with that adapter. Empty disables LoRA awareness.
+    backend_adapters: str = ""
+    lora_fallback_to_base: bool = True      # serve from base pool if no adapter-capable backend
+
+    # --- Extensions: semantic prompt cache ---
+    # Catches paraphrased prompts that share no byte-identical prefix.
+    # Cosine similarity above semantic_cache_threshold triggers a hit.
+    semantic_cache_enabled: bool = False
+    semantic_cache_threshold: float = 0.97
+    semantic_cache_max_entries_per_tenant: int = 1024
+    semantic_cache_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     # --- Fault tolerance ---
     max_retries: int = 2                 # failover attempts before first byte

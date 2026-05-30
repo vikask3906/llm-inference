@@ -11,13 +11,16 @@ from .config import Config
 
 
 class Backend:
-    __slots__ = ("id", "url", "model", "healthy")
+    __slots__ = ("id", "url", "model", "healthy", "adapters")
 
-    def __init__(self, id: str, url: str, model: str) -> None:
+    def __init__(self, id: str, url: str, model: str,
+                 adapters: set[str] | None = None) -> None:
         self.id = id
         self.url = url
         self.model = model
         self.healthy = True
+        # LoRA adapters loaded on this backend. Empty set = base only.
+        self.adapters: set[str] = set(adapters) if adapters else set()
 
 
 class BackendRegistry:

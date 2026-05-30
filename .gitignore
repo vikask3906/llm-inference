@@ -28,3 +28,9 @@ env/
 
 # Rust build artifacts
 rust/target/
+
+# RunPod SSH keys — PRIVATE KEYS, NEVER COMMIT
+docs/demo.txt
+docs/demo.txt.pub
+docs/demoo.txt
+docs/demoo.txt.pub

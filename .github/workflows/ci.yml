@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feat/**"]
   pull_request:
     branches: [main]
 
@@ -36,3 +36,52 @@ jobs:
 
       - name: Fairness demo (smoke)
         run: python bench/fairness_sim.py
+
+  rust:
+    name: Rust build + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Build (release)
+        working-directory: rust
+        run: cargo build --release
+      - name: Tests
+        working-directory: rust
+        run: cargo test --release
+
+  bench-smoke:
+    name: Rust gateway smoke benchmark
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Build binaries
+        working-directory: rust
+        run: cargo build --release --bin gateway --bin mockbackend --bin loadgen
+      - name: Run smoke benchmark
+        working-directory: rust
+        shell: bash
+        run: |
+          # Stand up the mock backend, then the gateway pointed at it.
+          ./target/release/mockbackend 127.0.0.1:9101 &
+          MOCK_PID=$!
+          GW_BACKENDS="b0=http://127.0.0.1:9101" GW_LOG_LEVEL=warn \
+            ./target/release/gateway &
+          GW_PID=$!
+          # Wait for the gateway to bind.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            curl -fs http://127.0.0.1:8000/healthz && break || sleep 1
+          done
+          # 5k requests at c=32: proves the binaries work end-to-end on
+          # Linux CI. Not a real perf number -- a real bench needs an
+          # isolated host (see docs/BENCHMARKS.md).
+          ./target/release/loadgen --url http://127.0.0.1:8000 --n 5000 -c 32 --label ci-smoke
+          kill $GW_PID $MOCK_PID || true

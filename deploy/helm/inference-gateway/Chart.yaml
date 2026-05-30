@@ -1,0 +1,15 @@
+apiVersion: v2
+name: inference-gateway
+description: Prefix-aware LLM inference gateway (Rust hot path). Routes OpenAI-compatible chat completions to the vLLM backend already holding the matching KV prefix, balanced against per-node saturation.
+type: application
+version: 0.1.0
+appVersion: "1.1.0"
+keywords:
+  - llm
+  - vllm
+  - inference
+  - load-balancer
+  - prefix-cache
+maintainers:
+  - name: vikask3906
+    url: https://github.com/vikask3906/llm-inferance

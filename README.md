@@ -61,6 +61,17 @@ tenant stays within quota (same total budget):
 Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 `python bench/fairness_sim.py`.
 
+### Standalone-package benchmarks
+
+Each extension ships with its own before/after benchmark, written up in
+`docs/benchmarks/`:
+
+| package | benchmark | headline |
+|---|---|---|
+| **DAG scheduler** | `bench/dag_bench.py` | **3.0×** lower makespan, **3.0×** higher prefix-cache hit rate vs round-robin on a multi-chain workflow (5 chains × 4 nodes × 16-block shared context) — [`DAG_RESULTS.md`](docs/benchmarks/DAG_RESULTS.md) |
+| **RAG chunk-affinity** | `bench/rag_bench.py` | **60% chunk-cache hit rate** vs round-robin's 50% on a multi-tenant RAG workload (3 disjoint sub-corpora, 600 chunks, Zipf α=1.2), **20% lower** per-request prefill cost — [`RAG_RESULTS.md`](docs/benchmarks/RAG_RESULTS.md) |
+| **Admission control** | `bench/admission_bench.py` | At **2× offered load**: baseline collapses to **2% gold-tier SLO compliance**, admission keeps gold at **100%** (bronze shed to 29% served, by design) — [`ADMISSION_RESULTS.md`](docs/benchmarks/ADMISSION_RESULTS.md) |
+
 ## How it works
 
 Two layers of routing intelligence, scored by **estimated time-to-first-token**:
@@ -102,6 +113,24 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   side channel.
 - **Observability** — structured JSON logs (request_id + trace_id), Prometheus
   `/metrics`, OpenTelemetry traces, and a provisioned Grafana dashboard.
+- **RAG-aware routing** — structured RAG payloads are canonicalized (deduped,
+  sorted chunks → identical prefix), routed by chunk-affinity (set-overlap) to
+  the backend already holding the most chunks. Opt-in via `GW_RAG_ENABLED`.
+- **SLO-aware admission** — TTFT-budget fail-fast, fleet-pressure priority
+  shedding (gold protected, bronze shed first), Retry-After headers. Opt-in via
+  `GW_ADMISSION_ENABLED`.
+- **Disaggregated prefill/decode** — Splitwise/DistServe-style phase splitting:
+  assign prefill and decode to specialized backends when the split beats
+  co-location. Opt-in via `GW_DISAGG_POOLS`.
+- **Multi-modal routing** — capability filtering (only vision backends serve
+  images) + media-affinity cache (prefer the backend that already encoded an
+  image). Opt-in via `GW_MULTIMODAL_ENABLED`.
+- **DAG scheduling** — `POST /v1/dag/schedule` plans cache-locality-aware
+  placement of multi-step workflows (map-reduce, tool-use chains). Opt-in via
+  `GW_DAG_ENABLED`.
+- **Autoscaling** — SLO-driven replica planner (Erlang-C + utilization target,
+  anti-flapping cooldowns). Emits scaling recommendations via `/autoscale` and
+  Prometheus metrics. Opt-in via `GW_AUTOSCALE_ENABLED`.
 - **OpenAI-compatible** — `POST /v1/chat/completions` with SSE streaming.
 
 ## Quickstart
@@ -109,20 +138,26 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 61 tests
+python -m pytest -q            # 222 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
 ```
 
-Full stack (gateway + 3 mock backends + Prometheus + Grafana):
+Full stack (gateway + 3 mock backends + Prometheus + Grafana) — one command
+brings it up, waits for health, and drives sustained traffic so the
+pre-provisioned Grafana dashboard fills with live data:
 
 ```bash
-docker compose up --build
-# gateway   -> http://localhost:8000
-# Prometheus-> http://localhost:9090
-# Grafana   -> http://localhost:3000   (dashboard pre-loaded)
+make demo                      # or: python scripts/demo.py   (no make needed, Windows-friendly)
+# gateway     -> http://localhost:8000
+# Prometheus  -> http://localhost:9090
+# Grafana     -> http://localhost:3000   (anonymous admin; dashboard pre-loaded)
 
+make traffic                   # drive 60s more prefix-heavy traffic at the running gateway
+make down                      # tear the stack down
+
+# a single streaming request by hand:
 curl -N http://localhost:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"mock-model","messages":[{"role":"user","content":"hello"}],"stream":true}'
@@ -131,20 +166,28 @@ curl -N http://localhost:8000/v1/chat/completions \
 ## Project layout
 
 ```
-gateway/        data plane + control plane
-  router.py        strategies + est-TTFT cost function
-  radix_tree.py    path-compressed prefix tree + LRU eviction
-  hashing.py       chained block hashing (mirrors vLLM APC)
-  circuit.py       per-backend circuit breaker
-  tenancy.py       token buckets + tenant registry + rate limiter
-  metrics.py       Prometheus exposition
-  tracing.py       OpenTelemetry spans
-  logging_setup.py structured JSON logs
-  server.py        OpenAI-compatible async proxy
-mock_backend/   fake vLLM (prefix cache sim + SSE + /metrics)
-bench/          sim, e2e, fairness, load test
-deploy/         Prometheus + Grafana provisioning
-docs/DESIGN.md  full design doc (architecture, trade-offs, roadmap)
+gateway/           data plane + control plane
+  server.py           OpenAI-compatible async proxy (the hot path)
+  router.py           strategies + est-TTFT cost function
+  radix_tree.py       path-compressed prefix tree + LRU eviction
+  hashing.py          chained block hashing (mirrors vLLM APC)
+  circuit.py          per-backend circuit breaker
+  tenancy.py          token buckets + tenant registry + rate limiter
+  metrics.py          Prometheus exposition
+  tracing.py          OpenTelemetry spans
+  logging_setup.py    structured JSON logs
+  rag/                RAG structuring + chunk-affinity routing
+  admission/          SLO-aware admission control + load shedding
+  disagg/             disaggregated prefill/decode routing
+  multimodal/         multi-modal capability + affinity routing
+  dag/                cache-locality-aware DAG scheduler
+  autoscale/          SLO-driven autoscaler / capacity planner
+  extensions/         LoRA, semantic cache, speculative, TTFT predictor
+mock_backend/      fake vLLM (prefix cache sim + SSE + /health + /metrics)
+bench/             sim, e2e, fairness, load test, benchmark matrix
+scripts/           demo orchestrator + standalone package demos
+deploy/            Docker Compose + Prometheus + Grafana provisioning + Helm
+docs/DESIGN.md     full design doc (architecture, trade-offs, roadmap)
 ```
 
 ## Design

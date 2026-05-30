@@ -4,6 +4,7 @@
 //! the best by least-load + round-robin so a tiny shared prefix can't pin all
 //! traffic to one node while a large real affinity still isolates one backend.
 
+use crate::bpe_hashing::bpe_block_hashes;
 use crate::config::{Config, Strategy};
 use crate::hashing::block_hashes;
 use crate::load::LoadTracker;
@@ -15,6 +16,13 @@ pub struct RouteResult {
     pub hashes: Vec<u64>,
     pub tokens: usize,
     pub match_blocks: usize,
+    pub hash_mode: HashMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashMode {
+    Char,
+    Bpe,
 }
 
 pub struct Router {
@@ -36,19 +44,38 @@ impl Router {
         strategy: Strategy,
         seed: u64,
     ) -> RouteResult {
-        let hashes = block_hashes(prompt, self.cfg.block_chars, self.cfg.hash_cutoff_blocks, seed);
+        let (hashes, hash_mode) = if self.cfg.use_bpe_hashing {
+            match bpe_block_hashes(prompt, self.cfg.block_tokens, self.cfg.hash_cutoff_blocks, seed) {
+                Ok(h) => (h, HashMode::Bpe),
+                Err(_) => (
+                    block_hashes(prompt, self.cfg.block_chars, self.cfg.hash_cutoff_blocks, seed),
+                    HashMode::Char,
+                ),
+            }
+        } else {
+            (
+                block_hashes(prompt, self.cfg.block_chars, self.cfg.hash_cutoff_blocks, seed),
+                HashMode::Char,
+            )
+        };
         let tokens = hashes.len() * self.cfg.block_tokens;
 
         match strategy {
             Strategy::RoundRobin => {
                 let b = backends[self.rr % backends.len()].clone();
                 self.rr += 1;
-                RouteResult { backend_id: b, hashes, tokens, match_blocks: 0 }
+                RouteResult { backend_id: b, hashes, tokens, match_blocks: 0, hash_mode }
             }
             Strategy::ConsistentHash => {
                 let key = hashes.first().copied().unwrap_or(0);
                 let idx = (key % backends.len() as u64) as usize;
-                RouteResult { backend_id: backends[idx].clone(), hashes, tokens, match_blocks: 0 }
+                RouteResult {
+                    backend_id: backends[idx].clone(),
+                    hashes,
+                    tokens,
+                    match_blocks: 0,
+                    hash_mode,
+                }
             }
             Strategy::PrefixTree => {
                 let matches = tree.match_prefix(&hashes);
@@ -76,7 +103,7 @@ impl Router {
                 if scored.is_empty() {
                     let b = saturated_fallback.unwrap_or_else(|| backends[0].clone());
                     let mb = *matches.get(&b).unwrap_or(&0);
-                    return RouteResult { backend_id: b, hashes, tokens, match_blocks: mb };
+                    return RouteResult { backend_id: b, hashes, tokens, match_blocks: mb, hash_mode };
                 }
 
                 let min_ttft = scored.iter().map(|s| s.0).fold(f64::INFINITY, f64::min);
@@ -90,7 +117,7 @@ impl Router {
                     good.into_iter().filter(|(b, _)| load.inflight(b) == min_load).collect();
                 let (b, mb) = tied[self.rr % tied.len()].clone();
                 self.rr += 1;
-                RouteResult { backend_id: b, hashes, tokens, match_blocks: mb }
+                RouteResult { backend_id: b, hashes, tokens, match_blocks: mb, hash_mode }
             }
         }
     }

@@ -37,10 +37,11 @@ class Tenant:
     rps: float
     tps: float
     max_inflight: int
+    tier: str = "anonymous"          # tier name, kept for priority-based admission
 
     @classmethod
-    def from_tier(cls, tenant_id: str, tier: Tier) -> "Tenant":
-        return cls(tenant_id, tier.rps, tier.tps, tier.max_inflight)
+    def from_tier(cls, tenant_id: str, tier: Tier, tier_name: str = "anonymous") -> "Tenant":
+        return cls(tenant_id, tier.rps, tier.tps, tier.max_inflight, tier_name)
 
 
 class TokenBucket:
@@ -103,10 +104,13 @@ class TenantRegistry:
                 continue
             key, _, rest = pair.partition("=")
             tid, _, tier_name = rest.partition(":")
-            tier = self._tiers.get(tier_name.strip() or "bronze", self._tiers["bronze"])
+            name = tier_name.strip() or "bronze"
+            if name not in self._tiers:
+                name = "bronze"
+            tier = self._tiers[name]
             key = key.strip()
-            self._by_key[key] = Tenant.from_tier(tid.strip() or key, tier)
-        self._anon = Tenant.from_tier("anonymous", self._tiers["anonymous"])
+            self._by_key[key] = Tenant.from_tier(tid.strip() or key, tier, name)
+        self._anon = Tenant.from_tier("anonymous", self._tiers["anonymous"], "anonymous")
 
     def resolve(self, headers) -> Tenant:
         auth = headers.get("authorization") or headers.get("Authorization") or ""

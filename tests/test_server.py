@@ -186,12 +186,17 @@ def test_rate_limit_returns_429_with_headers():
         gw.limiter = RateLimiter()
         async with _gwclient() as c:
             hdr = {"authorization": "Bearer sk-test"}
-            resps = []
-            for _ in range(10):                       # exceed the rps burst
-                resps.append(await c.post(
+
+            async def one():
+                return await c.post(
                     "/v1/chat/completions",
                     json={"model": "mock-model", "messages": _msgs(), "max_tokens": 8},
-                    headers=hdr))
+                    headers=hdr)
+
+            # Fire the burst concurrently so all 10 hit the rps gate within the
+            # same instant -- otherwise the 5/sec bucket refills between slow
+            # sequential requests and nothing is ever throttled.
+            resps = await asyncio.gather(*[one() for _ in range(10)])
             throttled = [r for r in resps if r.status_code == 429]
             assert throttled, [r.status_code for r in resps]
             assert "Retry-After" in throttled[0].headers

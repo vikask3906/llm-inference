@@ -30,3 +30,18 @@ serde_json = "1"
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", default-features = false, features = ["v4", "fast-rng"] }
+
+# Optional extensions. To enable Rust BPE hashing, uncomment the tokenizers
+# line below and rebuild with `cargo build --features bpe`. Kept out by
+# default so the binary stays slim and the build does not require the
+# crates.io index. The source in src/bpe_hashing.rs is feature-gated -- it
+# compiles to a stub returning Err("...without --features bpe") when the
+# feature is off.
+# tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+
+[features]
+default = []
+# Enable to compile the Rust BPE token-ID hasher. Requires the tokenizers
+# dependency above to be uncommented.
+# bpe = ["tokenizers"]
+bpe = []

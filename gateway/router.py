@@ -11,27 +11,32 @@ from __future__ import annotations
 """
 
 from .config import Config
+from .extensions.bpe_hashing import block_hashes_with_fallback
+from .extensions.ttft_predictor import TTFTPredictor, blended_ttft, features_for
 from .hashing import block_hashes
 from .load_tracker import LoadTracker
 from .radix_tree import RadixTree
 
 
 class RouteResult:
-    __slots__ = ("backend_id", "hashes", "tokens", "match_blocks")
+    __slots__ = ("backend_id", "hashes", "tokens", "match_blocks", "hash_mode")
 
-    def __init__(self, backend_id, hashes, tokens, match_blocks):
+    def __init__(self, backend_id, hashes, tokens, match_blocks, hash_mode="char"):
         self.backend_id = backend_id
         self.hashes = hashes
         self.tokens = tokens
         self.match_blocks = match_blocks
+        self.hash_mode = hash_mode
 
 
 class Router:
-    def __init__(self, cfg: Config, tree: RadixTree, load: LoadTracker):
+    def __init__(self, cfg: Config, tree: RadixTree, load: LoadTracker,
+                 predictor: TTFTPredictor | None = None):
         self.cfg = cfg
         self.tree = tree
         self.load = load
         self._rr = 0
+        self.predictor = predictor
 
     def _candidates(self, backends: list[str]) -> list[str]:
         return backends
@@ -39,19 +44,28 @@ class Router:
     def choose(self, prompt: str, backends: list[str], strategy: str | None = None,
                seed: int = 0) -> RouteResult:
         strategy = strategy or self.cfg.strategy
-        hashes = block_hashes(prompt, self.cfg.block_chars, self.cfg.hash_cutoff_blocks, seed=seed)
+        if self.cfg.use_bpe_hashing:
+            hashes, mode = block_hashes_with_fallback(
+                prompt, self.cfg.block_chars, self.cfg.block_tokens,
+                self.cfg.hash_cutoff_blocks, self.cfg.tokenizer_model,
+                use_bpe=True, seed=seed,
+            )
+        else:
+            hashes = block_hashes(prompt, self.cfg.block_chars,
+                                  self.cfg.hash_cutoff_blocks, seed=seed)
+            mode = "char"
         tokens = len(hashes) * self.cfg.block_tokens
         cands = self._candidates(backends)
 
         if strategy == "round_robin":
             b = cands[self._rr % len(cands)]
             self._rr += 1
-            return RouteResult(b, hashes, tokens, 0)
+            return RouteResult(b, hashes, tokens, 0, mode)
 
         if strategy == "consistent_hash":
             key = hashes[0] if hashes else 0
             b = cands[key % len(cands)]
-            return RouteResult(b, hashes, tokens, 0)
+            return RouteResult(b, hashes, tokens, 0, mode)
 
         # prefix_tree: minimize estimated TTFT, then load-balance within hysteresis
         match = self.tree.match(hashes)
@@ -70,7 +84,7 @@ class Router:
 
         if not scored:                         # everything saturated
             b = saturated_fallback or cands[0]
-            return RouteResult(b, hashes, tokens, match.get(b, 0))
+            return RouteResult(b, hashes, tokens, match.get(b, 0), mode)
 
         # Backends whose TTFT is within hysteresis of the best are "equivalent":
         # spread across them by least-load (+ round-robin) so a tiny shared prefix
@@ -82,7 +96,7 @@ class Router:
         tied = [(b, m) for (b, m) in good if self.load.inflight[b] == min_load]
         b, m_blocks = tied[self._rr % len(tied)]
         self._rr += 1
-        return RouteResult(b, hashes, tokens, m_blocks)
+        return RouteResult(b, hashes, tokens, m_blocks, mode)
 
     def _est_ttft(self, tokens: int, match_blocks: int, backend_id: str) -> float:
         cached_tokens = match_blocks * self.cfg.block_tokens
@@ -90,4 +104,13 @@ class Router:
         # MVP: linear prefill. Phase 2: a*(N-m)*N + b*(N-m) fitted from real timings.
         prefill_ms = self.cfg.prefill_ms_per_token * uncached
         queue_ms = self.load.inflight[backend_id] * self.cfg.service_ms_per_request
-        return prefill_ms + queue_ms
+        static_ttft = prefill_ms + queue_ms
+        if self.predictor is None or not self.predictor.available():
+            return static_ttft
+        feats = features_for(prompt_tokens=tokens, match_blocks=match_blocks,
+                             block_tokens=self.cfg.block_tokens,
+                             inflight=self.load.inflight[backend_id],
+                             kv_usage=self.load.kv_usage[backend_id],
+                             backend_id=backend_id)
+        return blended_ttft(static_ttft, self.predictor.predict(feats),
+                            self.cfg.ttft_predictor_weight)

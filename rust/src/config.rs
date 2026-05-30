@@ -35,6 +35,13 @@ pub struct Config {
 
     // --- observability ---
     pub log_level: String, // "INFO" | "WARN"  (WARN suppresses per-request log)
+
+    // --- extensions ---
+    // Token-ID prefix hashing (requires `--features bpe` at build time AND a
+    // tokenizer.json at tokenizer_file). Falls back to char hashing on any
+    // failure so the gateway never fails a request because of this.
+    pub use_bpe_hashing: bool,
+    pub tokenizer_file: String,
 }
 
 impl Default for Config {
@@ -60,6 +67,8 @@ impl Default for Config {
             max_output_tokens: 4096,
             chars_per_token: 4,
             log_level: "INFO".to_string(),
+            use_bpe_hashing: false,
+            tokenizer_file: String::new(),
         }
     }
 }

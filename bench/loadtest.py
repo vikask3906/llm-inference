@@ -15,12 +15,13 @@ Usage:
 import argparse
 import asyncio
 import random
+import time
 from collections import Counter
 
 import httpx
 
-DOC_CHARS = 6144
-N_DOCS = 15
+DOC_CHARS = 8000
+N_DOCS = 50
 
 
 def make_requests(n: int, seed: int) -> list[list[dict]]:
@@ -43,6 +44,9 @@ async def main() -> None:
     ap.add_argument("--strategy", default="prefix_tree")
     ap.add_argument("--n", type=int, default=1500)
     ap.add_argument("--concurrency", type=int, default=32)
+    ap.add_argument("--duration", type=float, default=0.0,
+                    help="seconds to keep re-firing the batch (0 = a single pass of --n); "
+                         "use a positive value to sustain traffic for a live Grafana demo")
     args = ap.parse_args()
 
     reqs = make_requests(args.n, seed=1)
@@ -62,7 +66,15 @@ async def main() -> None:
                     async for _ in resp.aiter_raw():
                         pass
 
-        await asyncio.gather(*(one(m) for m in reqs))
+        async def batch():
+            await asyncio.gather(*(one(m) for m in reqs))
+
+        if args.duration > 0:
+            deadline = time.monotonic() + args.duration
+            while time.monotonic() < deadline:
+                await batch()
+        else:
+            await batch()
 
     total = hits["hit"] + hits["miss"]
     print(f"strategy={args.strategy}  requests={total}")

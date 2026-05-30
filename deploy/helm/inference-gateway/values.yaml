@@ -1,0 +1,92 @@
+# Default values for the inference-gateway chart.
+
+# Which gateway implementation to deploy. "rust" is the production hot path
+# (~50x throughput, ~33x lower p99); "python" matches the MVP for comparison.
+gatewayKind: rust  # rust | python
+
+image:
+  repository: ghcr.io/vikask3906/inference-gateway
+  pullPolicy: IfNotPresent
+  tag: ""   # defaults to .Chart.AppVersion when empty
+
+replicaCount: 2
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Backends the gateway routes to. Each entry becomes a comma-separated
+# id=url pair in GW_BACKENDS.
+backends:
+  - id: b0
+    url: http://vllm-0.vllm.svc.cluster.local:8000
+  - id: b1
+    url: http://vllm-1.vllm.svc.cluster.local:8000
+
+# Routing strategy: prefix_tree | round_robin | consistent_hash | speculative
+routing:
+  strategy: prefix_tree
+  blockChars: 64
+  blockTokens: 16
+  hashCutoffBlocks: 512
+  backendCacheBlocks: 2000
+
+# Fault tolerance.
+faultTolerance:
+  maxRetries: 2
+  circuitFailThreshold: 3
+  circuitCooldownS: 5.0
+
+# Multi-tenancy.
+tenancy:
+  rateLimitEnabled: false
+  prefixIsolation: tenant   # tenant | global
+  defaultOutputTokens: 256
+  maxOutputTokens: 4096
+
+# Extensions (see gateway/extensions/*).
+extensions:
+  bpeHashing:
+    enabled: false
+    tokenizerModel: gpt2
+  ttftPredictor:
+    observationsPath: ""    # empty disables logging
+    modelPath: ""           # empty disables prediction
+    weight: 0.5
+  speculative:
+    k: 2
+  lora:
+    backendAdapters: ""     # "b0:summary,sql;b1:chat-ru"
+    fallbackToBase: true
+  semanticCache:
+    enabled: false
+    threshold: 0.97
+    maxEntriesPerTenant: 1024
+
+# Observability.
+observability:
+  logLevel: INFO
+  otelEndpoint: ""          # empty disables OTel export
+  serviceMonitor:
+    enabled: false          # set true if Prometheus Operator is installed
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+# Horizontal autoscaling.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podSecurityContext: {}
+securityContext: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
