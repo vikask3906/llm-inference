@@ -1,14 +1,14 @@
 //! OpenAI-compatible async reverse proxy (the Rust data plane).
 //!
-//! Hot path: parse -> filter candidates by circuit -> route under a short sync
-//! lock (never held across `.await`) -> stream the upstream SSE back. Pre-first-
-//! byte failover re-routes optimally on the shrinking candidate set, with the
-//! breaker recording success/failure. An in-flight `Drop` guard decrements load
-//! even on client disconnect. Per-request Prometheus metrics are emitted along
-//! the way; `/metrics` exposes them.
+//! Hot path: parse -> identify tenant -> admit (rate limit) -> filter
+//! candidates by circuit -> route under a short sync lock (never held across
+//! `.await`) -> stream the upstream SSE back. Pre-first-byte failover re-routes
+//! optimally on the shrinking candidate set, with the breaker recording
+//! success/failure. An in-flight `Drop` guard decrements load AND releases the
+//! tenant in-flight slot even on client disconnect.
 //!
-//! Still deferred (present in Python): tenancy/rate-limiting, OpenTelemetry
-//! tracing, structured JSON logging.
+//! Still deferred (present in Python): OpenTelemetry tracing, structured JSON
+//! logging, scrape-loop driven backend health.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router as AxumRouter;
@@ -29,6 +29,7 @@ use crate::load::LoadTracker;
 use crate::metrics::{MetricsCollector, BLOCK_BUCKETS, LATENCY_BUCKETS};
 use crate::radix_tree::RadixTree;
 use crate::router::{RouteResult, Router};
+use crate::tenancy::{tenant_seed, Admission, RateLimiter, Tenant, TenantRegistry};
 
 pub struct Backend {
     pub id: String,
@@ -48,6 +49,8 @@ pub struct AppState {
     client: reqwest::Client,
     metrics: MetricsCollector,
     breaker: Mutex<CircuitBreaker>,
+    tenants: TenantRegistry,
+    limiter: Mutex<RateLimiter>,
     cfg: Arc<Config>,
     clock: Instant,
 }
@@ -59,6 +62,7 @@ pub fn build_state(cfg: Config, backends: Vec<Backend>) -> SharedState {
     let cache_blocks = cfg.backend_cache_blocks;
     let fail_threshold = cfg.circuit_fail_threshold;
     let cooldown_s = cfg.circuit_cooldown_s;
+    let tenants_spec = cfg.tenants.clone();
     let inner = Inner {
         tree: RadixTree::new(cache_blocks),
         load: LoadTracker::new(),
@@ -71,6 +75,8 @@ pub fn build_state(cfg: Config, backends: Vec<Backend>) -> SharedState {
         client: reqwest::Client::new(),
         metrics: MetricsCollector::new(),
         breaker: Mutex::new(CircuitBreaker::new(fail_threshold, cooldown_s)),
+        tenants: TenantRegistry::new(&tenants_spec),
+        limiter: Mutex::new(RateLimiter::new()),
         cfg: Arc::new(cfg),
         clock: Instant::now(),
     })
@@ -96,6 +102,15 @@ fn strategy_name(s: Strategy) -> &'static str {
     }
 }
 
+fn parse_strategy(s: &str) -> Option<Strategy> {
+    match s {
+        "round_robin" => Some(Strategy::RoundRobin),
+        "consistent_hash" => Some(Strategy::ConsistentHash),
+        "prefix_tree" => Some(Strategy::PrefixTree),
+        _ => None,
+    }
+}
+
 fn extract_prompt(body: &serde_json::Value) -> String {
     let mut s = String::new();
     if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
@@ -113,18 +128,27 @@ fn extract_prompt(body: &serde_json::Value) -> String {
     s
 }
 
-/// Decrements in-flight when the response stream ends OR is dropped (client
-/// disconnect), so load accounting can't leak.
+/// Decrements per-backend in-flight + tenant in-flight on stream end or drop
+/// (client disconnect), so neither counter can leak.
 struct InflightGuard {
     state: SharedState,
     backend: String,
     tokens: u64,
+    /// Some((tenant_id, reserved_output)) when rate-limit enabled; else None.
+    tenant: Option<(String, f64)>,
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.state.inner.lock() {
             inner.load.on_complete(&self.backend, self.tokens);
+        }
+        if let Some((tid, reserved)) = &self.tenant {
+            if let Ok(mut lim) = self.state.limiter.lock() {
+                // We don't (yet) parse output tokens from the SSE stream, so we
+                // pass actual == reserved -> release the slot, no bucket adjust.
+                lim.release(tid, *reserved, *reserved);
+            }
         }
     }
 }
@@ -141,10 +165,39 @@ impl<S: Stream + Unpin> Stream for GuardedStream<S> {
     }
 }
 
+fn ratelimit_response(t: &Tenant, adm: &Admission) -> Response {
+    let retry_after = if adm.retry_after.is_finite() {
+        (adm.retry_after.ceil() as u64).max(1)
+    } else {
+        3600
+    };
+    let body = serde_json::json!({
+        "error": {
+            "message": format!("rate limit exceeded ({})", adm.reason.unwrap_or("")),
+            "type": "rate_limit_exceeded"
+        }
+    });
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("content-type", "application/json")
+        .header("Retry-After", retry_after)
+        .header("X-RateLimit-Limit-Requests", t.rps as u64)
+        .header("X-RateLimit-Limit-Tokens", t.tps as u64)
+        .header(
+            "X-RateLimit-Remaining-Requests",
+            adm.remaining_rps.max(0.0) as u64,
+        )
+        .header(
+            "X-RateLimit-Remaining-Tokens",
+            adm.remaining_tps.max(0.0) as u64,
+        )
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
 // ---------- /metrics ----------
 
 async fn metrics_endpoint(State(state): State<SharedState>) -> impl IntoResponse {
-    // refresh point-in-time gauges from current state (pull model)
     let now = state.clock.elapsed().as_secs_f64();
     {
         let inner = state.inner.lock().unwrap();
@@ -170,9 +223,20 @@ async fn metrics_endpoint(State(state): State<SharedState>) -> impl IntoResponse
             );
             state.metrics.set_gauge(
                 "gateway_backend_up",
-                1.0, // Rust gateway has no scrape loop yet -> assume up
+                1.0,
                 "1 if backend is healthy else 0",
                 &[("backend", &b.id)],
+            );
+        }
+    }
+    {
+        let lim = state.limiter.lock().unwrap();
+        for (tid, &n) in lim.inflight.iter() {
+            state.metrics.set_gauge(
+                "gateway_tenant_inflight",
+                n as f64,
+                "In-flight requests per tenant",
+                &[("tenant", tid)],
             );
         }
     }
@@ -184,15 +248,62 @@ async fn metrics_endpoint(State(state): State<SharedState>) -> impl IntoResponse
 
 // ---------- POST /v1/chat/completions ----------
 
-async fn chat_completions(State(state): State<SharedState>, body_bytes: Bytes) -> Response {
-    let parsed: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+async fn chat_completions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body_bytes: Bytes,
+) -> Response {
+    let mut parsed: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid JSON").into_response(),
     };
     let prompt = extract_prompt(&parsed);
 
+    let strategy = headers
+        .get("x-routing-strategy")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_strategy)
+        .unwrap_or(state.strategy);
+
+    // --- tenant identification + (optional) admission control ---
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
+    let tenant = state.tenants.resolve(auth_header);
+    state.metrics.inc_counter(
+        "gateway_tenant_requests_total",
+        1.0,
+        "Requests per tenant",
+        &[("tenant", &tenant.id)],
+    );
+
+    let input_tokens = ((prompt.len() / state.cfg.chars_per_token.max(1) as usize) as f64).max(1.0);
+    let max_tokens = parsed
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(state.cfg.default_output_tokens as u64);
+    let reserved_output = max_tokens.min(state.cfg.max_output_tokens as u64) as f64;
+    let est_cost = input_tokens + reserved_output;
+
+    let mut admitted = false; // true only when rate_limit_enabled and admit() succeeded
+    if state.cfg.rate_limit_enabled {
+        let now_lim = state.clock.elapsed().as_secs_f64();
+        let adm = state.limiter.lock().unwrap().admit(&tenant, est_cost, now_lim);
+        if !adm.allowed {
+            state.metrics.inc_counter(
+                "gateway_tenant_throttled_total",
+                1.0,
+                "Rate-limited requests per tenant",
+                &[("tenant", &tenant.id), ("reason", adm.reason.unwrap_or(""))],
+            );
+            return ratelimit_response(&tenant, &adm);
+        }
+        admitted = true;
+    }
+
     let backend_ids: Vec<String> = state.backends.iter().map(|b| b.id.clone()).collect();
     if backend_ids.is_empty() {
+        if admitted {
+            state.limiter.lock().unwrap().release(&tenant.id, reserved_output, 0.0);
+        }
         state.metrics.inc_counter(
             "gateway_errors_total",
             1.0,
@@ -201,6 +312,18 @@ async fn chat_completions(State(state): State<SharedState>, body_bytes: Bytes) -
         );
         return (StatusCode::SERVICE_UNAVAILABLE, "no backends").into_response();
     }
+
+    // Per-tenant prefix isolation: seed the gateway's routing hashes AND tell
+    // the backend to salt its own KV cache (vLLM-style cache_salt).
+    let mut seed: u64 = 0;
+    if state.cfg.prefix_isolation == "tenant" {
+        seed = tenant_seed(&tenant.id);
+        parsed["cache_salt"] = serde_json::Value::String(tenant.id.clone());
+    }
+    let body_to_forward: Bytes = match serde_json::to_vec(&parsed) {
+        Ok(v) => v.into(),
+        Err(_) => body_bytes.clone(),
+    };
 
     // Exclude backends with an open circuit; degrade to all if every one is open.
     let now = state.clock.elapsed().as_secs_f64();
@@ -235,8 +358,8 @@ async fn chat_completions(State(state): State<SharedState>, body_bytes: Bytes) -
                 &remaining,
                 &inner.tree,
                 &inner.load,
-                state.strategy,
-                0,
+                strategy,
+                seed,
             );
             inner.tree.insert(&r.hashes, &r.backend_id);
             inner.load.on_dispatch(&r.backend_id, r.tokens as u64);
@@ -275,7 +398,7 @@ async fn chat_completions(State(state): State<SharedState>, body_bytes: Bytes) -
             .client
             .post(&url)
             .header("content-type", "application/json")
-            .body(body_bytes.clone())
+            .body(body_to_forward.clone())
             .send()
             .await
         {
@@ -304,6 +427,9 @@ async fn chat_completions(State(state): State<SharedState>, body_bytes: Bytes) -
     let (chosen, upstream) = match (chosen, upstream) {
         (Some(c), Some(u)) => (c, u),
         _ => {
+            if admitted {
+                state.limiter.lock().unwrap().release(&tenant.id, reserved_output, 0.0);
+            }
             state.metrics.inc_counter(
                 "gateway_errors_total",
                 1.0,
@@ -316,12 +442,18 @@ async fn chat_completions(State(state): State<SharedState>, body_bytes: Bytes) -
     };
 
     state.breaker.lock().unwrap().record_success(&chosen.backend_id);
-    let strat = strategy_name(state.strategy);
+    let strat = strategy_name(strategy);
     state.metrics.inc_counter(
         "gateway_requests_total",
         1.0,
         "Total routed requests",
         &[("strategy", strat), ("backend", &chosen.backend_id)],
+    );
+    state.metrics.inc_counter(
+        "gateway_tenant_tokens_total",
+        input_tokens,
+        "Input tokens accounted per tenant",
+        &[("tenant", &tenant.id)],
     );
     state.metrics.observe(
         "gateway_prefix_match_blocks",
@@ -353,7 +485,12 @@ async fn chat_completions(State(state): State<SharedState>, body_bytes: Bytes) -
 
     let bid = chosen.backend_id.clone();
     let toks = chosen.tokens as u64;
-    let guard = InflightGuard { state: state.clone(), backend: bid.clone(), tokens: toks };
+    let guard = InflightGuard {
+        state: state.clone(),
+        backend: bid.clone(),
+        tokens: toks,
+        tenant: if admitted { Some((tenant.id.clone(), reserved_output)) } else { None },
+    };
     let guarded = GuardedStream { inner: upstream.bytes_stream().boxed(), _guard: guard };
 
     let mut builder = Response::builder()

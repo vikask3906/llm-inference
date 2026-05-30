@@ -1,14 +1,21 @@
 //! Gateway binary entrypoint: `cargo run --bin gateway`.
 //!
 //! Env:
-//!   GW_ADDR      bind address (default 0.0.0.0:8000)
-//!   GW_BACKENDS  "id=url,..." (default 3 localhost mock backends)
-//!   GW_STRATEGY  round_robin | consistent_hash | prefix_tree (default prefix_tree)
+//!   GW_ADDR                bind address (default 0.0.0.0:8000)
+//!   GW_BACKENDS            "id=url,..." (default 3 localhost mock backends)
+//!   GW_STRATEGY            round_robin | consistent_hash | prefix_tree (default prefix_tree)
+//!   GW_RATE_LIMIT_ENABLED  true|false (default false; tenancy is opt-in)
+//!   GW_TENANTS             "key=tenant:tier,..."  tier in {gold,silver,bronze}
+//!   GW_PREFIX_ISOLATION    tenant | global (default tenant)
 
 use std::env;
 
 use gateway_core::config::{Config, Strategy};
 use gateway_core::server::{app, build_state, Backend};
+
+fn env_bool(name: &str) -> Option<bool> {
+    env::var(name).ok().map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
 
 #[tokio::main]
 async fn main() {
@@ -19,6 +26,15 @@ async fn main() {
             "consistent_hash" => Strategy::ConsistentHash,
             _ => Strategy::PrefixTree,
         };
+    }
+    if let Some(b) = env_bool("GW_RATE_LIMIT_ENABLED") {
+        cfg.rate_limit_enabled = b;
+    }
+    if let Ok(v) = env::var("GW_TENANTS") {
+        cfg.tenants = v;
+    }
+    if let Ok(v) = env::var("GW_PREFIX_ISOLATION") {
+        cfg.prefix_isolation = v;
     }
 
     let spec = env::var("GW_BACKENDS").unwrap_or_else(|_| {
