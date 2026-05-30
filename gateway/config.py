@@ -80,6 +80,13 @@ class Config:
     circuit_fail_threshold: int = 3      # consecutive failures -> open circuit
     circuit_cooldown_s: float = 5.0      # open duration before a half-open probe
 
+    # --- Authentication ---
+    # When True, a request must carry Authorization: Bearer <key> with a key in
+    # the valid set (configured tenant keys + api_keys); otherwise -> 401. Default
+    # OFF so an unconfigured gateway stays open (dev / behind a service mesh).
+    require_auth: bool = False
+    api_keys: str = ""                      # extra valid keys (comma-sep) not tied to a tenant
+
     # --- Multi-tenancy / fairness ---
     rate_limit_enabled: bool = False        # enforcement is opt-in (needs tenants/tiers)
     # "key=tenant:tier,..."  tier in {gold, silver, bronze}; unknown keys -> anonymous

@@ -125,6 +125,10 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 - **Fault tolerance** — per-backend circuit breaker (closed/open/half-open with
   auto-recovery) and safe pre-first-byte failover (mid-stream errors propagate, no
   duplicated tokens).
+- **Authentication** — opt-in API-key auth (`GW_REQUIRE_AUTH`): a request must
+  carry `Authorization: Bearer <key>` with a key in the valid set (tenant keys +
+  `GW_API_KEYS`) or it's rejected `401` with `WWW-Authenticate`. Reuses the
+  tenant-key scheme, so an authenticated key still resolves to its tier.
 - **Multi-tenant fairness** — per-tenant RPS + TPS token buckets (OpenAI RPM+TPM
   style) + in-flight caps, `429` with `Retry-After`, and per-tenant prefix
   isolation (routing seed + backend `cache_salt`) to close the cross-tenant TTFT
@@ -164,7 +168,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 239 tests
+python -m pytest -q            # 247 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo

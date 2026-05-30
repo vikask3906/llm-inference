@@ -33,6 +33,7 @@ from .extensions.ttft_predictor import Observation, ObservationLogger, TTFTPredi
 from .load_tracker import LoadTracker
 from .logging_setup import configure_logging, log_event
 from .metrics import BLOCK_BUCKETS, MetricsCollector
+from .auth import Authenticator, parse_api_keys
 from .cluster import ClusterConfig, ClusterCoordinator, make_bus
 from .radix_tree import RadixTree
 from .hashing import block_hashes as _block_hashes
@@ -81,6 +82,9 @@ metrics = MetricsCollector()
 breaker = CircuitBreaker(cfg.circuit_fail_threshold, cfg.circuit_cooldown_s)
 tenants = TenantRegistry(cfg.tenants)
 limiter = RateLimiter()
+# API-key auth (opt-in): valid set = configured tenant keys + extra GW_API_KEYS.
+# require=False by default, so check() is a no-op and the gateway stays open.
+authenticator = Authenticator(tenants.keys() | parse_api_keys(cfg.api_keys), cfg.require_auth)
 log = configure_logging(cfg.log_level)
 
 # LoRA-aware routing: attach declared adapters to the backend objects so the
@@ -390,6 +394,18 @@ async def chat_completions(request: Request):
     # Count requests for the autoscale RPS estimator (before any early return).
     global _autoscale_request_count
     _autoscale_request_count += 1
+
+    # --- API-key authentication (before any tenant/routing work) ---
+    auth_ok, auth_reason = authenticator.check(request.headers)
+    if not auth_ok:
+        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+        metrics.inc_counter("gateway_auth_rejected_total",
+                            help="Requests rejected by API-key auth", reason=auth_reason)
+        return JSONResponse(
+            {"error": {"message": "missing or invalid API key",
+                       "type": "invalid_request_error", "code": "unauthorized"}},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer", "x-request-id": request_id})
 
     # --- tenant identification + admission control (before routing) ---
     tenant = tenants.resolve(request.headers)

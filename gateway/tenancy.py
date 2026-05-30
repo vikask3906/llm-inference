@@ -120,6 +120,10 @@ class TenantRegistry:
                 return self._by_key[key]
         return self._anon
 
+    def keys(self) -> set[str]:
+        """The configured tenant API keys (used by the auth layer's valid set)."""
+        return set(self._by_key)
+
 
 class RateLimiter:
     """Per-tenant RPS + TPS token buckets and an in-flight cap."""
