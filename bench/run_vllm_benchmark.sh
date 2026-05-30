@@ -48,6 +48,7 @@ N_DOCS="${N_DOCS:-30}"
 # regime where routing discriminates. Validated on 2x A40 at util 0.20.
 DOC_CHARS="${DOC_CHARS:-12000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"   # headroom so a big doc is never rejected
+NUM_GPU_BLOCKS="${NUM_GPU_BLOCKS:-}"      # optional precise KV cap (16 tok/block); blank = use util %
 TTFT_N="${TTFT_N:-600}"            # measurement requests (keep > n_docs for revisits)
 # Concurrency sweep. Prefix routing's cache benefit is largest at low load
 # (no queue pressure forcing the router to spill docs to balance), and shrinks
@@ -69,12 +70,19 @@ GW_PID=""
 
 start_vllm() {
     local gpu="$1" port="$2" logname="$3"
+    # Optional precise KV cap: NUM_GPU_BLOCKS overrides the util-based sizing
+    # (16 tokens/block). Set it BETWEEN prefix_tree's footprint (~6400 blocks
+    # for 15 docs) and round_robin's (~12750 for 30) so the smart half fits and
+    # the dumb whole doesn't -- the sharpest discrimination regime.
+    local extra=""
+    [[ -n "$NUM_GPU_BLOCKS" ]] && extra="--num-gpu-blocks-override $NUM_GPU_BLOCKS"
     CUDA_VISIBLE_DEVICES="$gpu" nohup vllm serve "$MODEL" \
         --served-model-name "$SERVED_NAME" \
         --host 127.0.0.1 --port "$port" \
         --enable-prefix-caching \
         --gpu-memory-utilization "$GPU_MEM_UTIL" \
         --max-model-len "$MAX_MODEL_LEN" \
+        $extra \
         > "$LOG_DIR/$logname.log" 2>&1 &
     echo $!
 }
