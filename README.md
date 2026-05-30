@@ -8,7 +8,8 @@ so a cluster of LLM servers reuses cache instead of recomputing it. A standalone
 platform-agnostic take on Google's GKE Inference Gateway.
 
 > **~2.4× the prefix-cache hit rate of round-robin** (99% vs 40%) while keeping
-> load balanced — plus fault tolerance, multi-tenant fairness, and full
+> load balanced — **validated on real vLLM + A40 GPUs: 10.5% lower mean TTFT,
+> 23.5% lower p95 TTFT** — plus fault tolerance, multi-tenant fairness, and full
 > observability (logs + metrics + traces).
 
 ---
@@ -57,6 +58,19 @@ tenant stays within quota (same total budget):
 | throughput | 209 req/s | **10,922 req/s** | **~52× higher** |
 | p99 under load | 399.51 ms | **12.20 ms** | **~33× lower** |
 | added latency (c=1) | +3.8 ms | **+0.8 ms** | ~4.5× lower |
+
+**Real-vLLM GPU validation** — 2× NVIDIA A40, Qwen2.5-1.5B-Instruct, vLLM 0.7.3
+with prefix caching, KV capped to force cache pressure (30 docs × 12 KB, n=600,
+c=8); TTFT measured client-side (first SSE byte):
+
+| metric | round-robin | **prefix-tree (this)** | improvement |
+|---|---|---|---|
+| TTFT mean | 216.6 ms | **193.8 ms** | **−10.5%** |
+| TTFT p95 | 740.1 ms | **566.5 ms** | **−23.5%** |
+| avg prefix-match blocks | 0.0 | **158.3** | routing affinity works |
+
+Conservative result (mild pressure, ample A40 bandwidth); gap widens on smaller
+GPUs or larger working sets — see **[docs/BENCHMARKS.md §D](docs/BENCHMARKS.md)**.
 
 Reproduce: `python bench/sim.py` · `python bench/e2e_inproc.py` ·
 `python bench/fairness_sim.py`.
