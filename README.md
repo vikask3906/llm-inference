@@ -201,7 +201,10 @@ for a complete file-by-file account of everything implemented.
 
 ## Roadmap
 
-- Real **vLLM** on GPUs for the headline TTFT-reduction number.
+- Real **vLLM** on GPUs for the headline TTFT-reduction number — see
+  **[docs/GPU_RUNBOOK.md](docs/GPU_RUNBOOK.md)** for the step-by-step (one
+  command on a 2-GPU pod; ~$3 / ~30 min; every pitfall from the prior run
+  baked into the script).
 - **Rust** hot-path rewrite ([`rust/`](rust/)): data-plane core + axum/reqwest
   streaming proxy done ✓ (20 core tests; e2e smoke-tested vs the mock backend);
   next port metrics/circuit/tenancy + the profiled before/after latency vs Python.

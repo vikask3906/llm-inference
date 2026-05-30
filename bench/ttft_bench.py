@@ -41,8 +41,9 @@ async def main() -> None:
     ap.add_argument("--n", type=int, default=200)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--docs", type=int, default=8, help="distinct prompts to cycle")
-    ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct",
-                    help="model name vLLM is serving (must match)")
+    ap.add_argument("--model", default="mock-model",
+                    help="model name the backend serves; matches vLLM's "
+                         "--served-model-name (default in run_vllm_benchmark.sh)")
     ap.add_argument("--label", default="")
     args = ap.parse_args()
 
