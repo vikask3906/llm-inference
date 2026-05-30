@@ -19,6 +19,11 @@ pub struct Config {
     pub max_inflight: u32,
     pub hysteresis_ms: f64,
     pub strategy: Strategy,
+
+    // --- fault tolerance ---
+    pub max_retries: u32,
+    pub circuit_fail_threshold: u32,
+    pub circuit_cooldown_s: f64,
 }
 
 impl Default for Config {
@@ -34,6 +39,9 @@ impl Default for Config {
             max_inflight: 64,
             hysteresis_ms: 5.0,
             strategy: Strategy::PrefixTree,
+            max_retries: 2,
+            circuit_fail_threshold: 3,
+            circuit_cooldown_s: 5.0,
         }
     }
 }
