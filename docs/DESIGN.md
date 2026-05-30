@@ -86,6 +86,8 @@ be fast; metric scraping and table maintenance are off the critical path.
   buckets and in-flight caps (admission control, before routing).
 - `tracing` — OpenTelemetry: one `chat.completion` span per request (model,
   tenant, backend, cache hit, retries, status, output tokens), OTLP-exportable.
+- `logging_setup` — structured JSON logs, one line per request, carrying
+  `request_id` + `trace_id` so logs correlate with traces and metrics.
 - `server` — async reverse proxy + SSE streaming + failover + control-plane loop.
 
 ---
@@ -307,9 +309,10 @@ of the abuser — the core fairness property.
 
 ## 13. Roadmap (Phase 2+)
 - Real **vLLM** on ≥2 cheap cloud GPUs; fit the bilinear cost model from timings.
-- Observability: Prometheus `/metrics` ✓, OpenTelemetry tracing ✓, and a
-  provisioned **Grafana dashboard** ✓ (`docker compose up` → Grafana :3000,
-  Prometheus :9090); next: a vs-NGINX round-robin comparison panel.
+- Observability triad complete: structured JSON logs ✓, Prometheus `/metrics` ✓,
+  OpenTelemetry tracing ✓, and a provisioned **Grafana dashboard** ✓
+  (`docker compose up` → Grafana :3000, Prometheus :9090); next: a vs-NGINX
+  round-robin comparison panel.
 - **Rust** hot-path rewrite with profiled latency/throughput before/after.
 - COW/epoch reclamation in the tree (path compression is implemented ✓).
 - **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its

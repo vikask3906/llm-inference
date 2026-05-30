@@ -50,6 +50,9 @@ class Config:
     max_output_tokens: int = 4096           # cap on the output reservation
     chars_per_token: int = 4                # prompt token estimate for quota accounting
 
+    # --- Observability ---
+    log_level: str = "INFO"
+
     # --- Backends (used by the HTTP layer) ---
     # Comma-separated "id=url" pairs, all assumed to serve `default_model`.
     backends: str = "b0=http://localhost:9001,b1=http://localhost:9002,b2=http://localhost:9003"
