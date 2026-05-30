@@ -41,13 +41,18 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.25}"
 # n_docs is sized so prefix_tree's half (n_docs/2) ~fits the KV cache while
 # round_robin's full n_docs doesn't -- the regime where routing discriminates.
 # ~50 large docs suits a ~170K-token cache (util 0.20 on a 48GB A40).
-N_DOCS="${N_DOCS:-50}"
-# ~12000 chars tokenizes to ~4-6K tokens for this repetitive text (it's denser
-# than 4 chars/token), so a doc fits under MAX_MODEL_LEN and prefix_tree's half
-# (~25 docs) fits the ~170K-token cache while round_robin's full 50 don't.
+N_DOCS="${N_DOCS:-30}"
+# ~12000 chars ~= 6.8K tokens for this repetitive text (~1.8 chars/token), so a
+# doc fits under MAX_MODEL_LEN and prefix_tree's half (~15 docs ~102K tokens)
+# fits the ~170K-token cache while round_robin's full 30 (~204K) don't -- the
+# regime where routing discriminates. Validated on 2x A40 at util 0.20.
 DOC_CHARS="${DOC_CHARS:-12000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"   # headroom so a big doc is never rejected
 TTFT_N="${TTFT_N:-600}"            # measurement requests (keep > n_docs for revisits)
+# Concurrency sweep. Prefix routing's cache benefit is largest at low load
+# (no queue pressure forcing the router to spill docs to balance), and shrinks
+# as load rises and load-balancing takes over -- so sweep to show the curve.
+TTFT_C="${TTFT_C:-1 8 32}"
 WARMUP_N="${WARMUP_N:-150}"        # pre-populate the cache to steady state
 PIN_VERSIONS="${PIN_VERSIONS:-1}"
 
@@ -172,15 +177,17 @@ run_one_strategy() {
         --model "$SERVED_NAME" --max-tokens 8 \
         > "$LOG_DIR/warmup-$strat.log"
 
-    echo ">> TTFT measurement (n=$TTFT_N, c=8, $N_DOCS docs x $DOC_CHARS chars)..."
-    python bench/ttft_bench.py \
-        --url "http://127.0.0.1:$GW_PORT" \
-        --strategy "$strat" \
-        --n "$TTFT_N" --concurrency 8 \
-        --n-docs "$N_DOCS" --doc-chars "$DOC_CHARS" \
-        --model "$SERVED_NAME" \
-        --label "$strat n=$TTFT_N c=8" \
-        | tee -a "$OUT"
+    echo ">> TTFT measurement (n=$TTFT_N, c={$TTFT_C}, $N_DOCS docs x $DOC_CHARS chars)..."
+    for c in $TTFT_C; do
+        python bench/ttft_bench.py \
+            --url "http://127.0.0.1:$GW_PORT" \
+            --strategy "$strat" \
+            --n "$TTFT_N" --concurrency "$c" \
+            --n-docs "$N_DOCS" --doc-chars "$DOC_CHARS" \
+            --model "$SERVED_NAME" \
+            --label "$strat c=$c" \
+            | tee -a "$OUT"
+    done
 
     echo ">> final cache stats (delta from baseline = $strat's contribution):"
     python bench/vllm_cache_stats.py \
