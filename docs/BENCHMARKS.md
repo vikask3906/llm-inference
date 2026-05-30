@@ -1,33 +1,44 @@
 # Benchmarks: Python gateway vs Rust gateway
 
 Measures the **gateway's own overhead** — the cost the proxy adds on top of the
-backend. Run on a single machine against a *fast* mock backend (token delay = 0,
-prefill = 0) so backend time is minimal and the gateway is what's being measured.
-The Rust gateway is built `--release`.
+backend. Run on a single Windows machine; Rust binaries built `--release`.
 
 ## TL;DR
 
-Per-request overhead at concurrency 1 (backend time subtracted):
+| metric | Python gateway | **Rust gateway** | ratio |
+|---|---|---|---|
+| **added latency** (concurrency 1, backend subtracted) | +3.8 ms | **+0.8 ms** | **~4.5× lower** |
+| **throughput** (concurrency 64, fast backend) | 209 req/s | **16,651 req/s** | **~80× higher** |
+| **throughput** (concurrency 128) | 212 req/s | **15,220 req/s** | **~72× higher** |
+| **p99 latency** under load (c64) | 399.51 ms | **7.38 ms** | **~54× lower** |
+| **p99 latency** under load (c128) | 922.42 ms | **16.44 ms** | **~56× lower** |
 
-| gateway | added latency (mean) | single-stream throughput |
-|---|---|---|
-| Python (FastAPI/uvicorn) | **+3.8 ms** | 120 req/s |
-| **Rust (axum/reqwest)** | **+0.8 ms** | **184 req/s** |
-
-The Rust hot path adds **~4.5× less latency per request** and sustains ~1.5× the
-single-stream request rate.
+The Rust hot path is a real, measured optimization — not just lower per-request
+overhead, but a fundamentally different throughput regime under load.
 
 ## Methodology
 
-- `bench/latency_bench.py`: fires N requests at concurrency C, consumes each SSE
-  stream fully, reports throughput + p50/p95/p99.
-- Three targets, all hitting the **same** mock backend:
-  - **direct** — client → mock backend (baseline; the gateway's floor).
-  - **python** — client → Python gateway → mock.
-  - **rust** — client → Rust gateway (release) → mock.
-- `added latency = gateway − direct` at the same concurrency.
+Two complementary tests:
 
-## Results — concurrency 1 (clean: no backend queuing)
+### A. Per-request overhead — concurrency 1
+- Backend: Python `uvicorn` mock with `MOCK_TOKEN_DELAY_S=0`, `MOCK_PREFILL_S_PER_BLOCK=0`.
+- Load: `bench/latency_bench.py` (Python `httpx` async client, n=400, c=1).
+- `added latency = gateway_latency − direct_latency` at the same concurrency.
+- At c=1 there's no queuing, so the difference is pure per-request overhead.
+
+### B. Throughput + tail — concurrency 64/128
+- Backend: **`rust/src/bin/mockbackend.rs`** — a tiny `axum` mock that returns
+  an instant static SSE response (~43k req/s ceiling, so the **backend isn't
+  the bottleneck**).
+- Load: **`rust/src/bin/loadgen.rs`** — `tokio + reqwest` driver (the Python
+  `httpx` client capped at ~370 req/s, too slow to differentiate the gateways'
+  ceilings).
+- 20–30k requests per run.
+
+Both tests hit the **same** mock backend for direct/Python-gateway/Rust-gateway
+runs, so any gateway-specific overhead shows up cleanly.
+
+## Results — A. concurrency 1 (Python mock, delays=0)
 
 | target | throughput | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) |
 |---|---|---|---|---|---|
@@ -35,53 +46,49 @@ single-stream request rate.
 | python gateway | 120 req/s | 7.94 | 11.42 | 15.14 | 8.31 |
 | **rust gateway** | **184 req/s** | **5.12** | **6.88** | **12.84** | **5.39** |
 
-→ **added latency:** Python **+3.8 ms**, Rust **+0.8 ms**. Rust sustains 184 vs
-120 req/s on a single stream.
+→ **added latency:** Python **+3.8 ms**, Rust **+0.8 ms**.
 
-## Results — concurrency 64 (backend-bound — *not* a fair gateway comparison)
+## Results — B. throughput + tail (Rust mock + Rust loadgen)
 
-| target | throughput | p50 (ms) | p95 (ms) | p99 (ms) |
-|---|---|---|---|---|
-| direct | 201 req/s | 288 | 402 | 607 |
-| python gateway | 101 req/s | 473 | 1631 | 2548 |
-| rust gateway | 81 req/s | 679 | 1369 | 3337 |
+| target | conc | throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) |
+|---|---|---|---|---|---|---|
+| direct (backend ceiling) | 64 | 43,135 | 1.34 | 2.47 | 3.37 | 1.45 |
+| direct (backend ceiling) | 128 | 43,607 | 2.70 | 4.84 | 6.55 | 2.87 |
+| python gateway | 64 | 209 | 305.17 | 360.25 | 399.51 | 304.69 |
+| python gateway | 128 | 212 | 577.02 | 805.89 | 922.42 | 598.08 |
+| **rust gateway** | 64 | **16,651** | **3.64** | **5.95** | **7.38** | 3.79 |
+| **rust gateway** | 128 | **15,220** | **7.89** | **13.36** | **16.44** | 8.28 |
 
-**Read these with caution.** The single Python `uvicorn` mock caps at ~200 req/s,
-and the load generator + both gateways + the mock all share one machine's CPU. At
-c64 everything queues at the backend / contends for cores, so this measures the
-*bottleneck*, not the gateways. The Rust number landing below Python here is a
-measurement artifact of that shared-host bottleneck, not a real deficiency — the
-clean signal is the concurrency-1 overhead above.
+→ Rust gateway sustains **~70–80× the throughput** of the Python gateway with
+**~50–60× lower p99**, against the same fast backend.
 
 ## Honest caveats
 
-- **The throughput/tail comparison needs a non-bottlenecked backend.** With one
-  Python mock the gateway can never out-run the backend. A faithful throughput/p99
-  comparison needs a faster backend (a Rust mock, or real vLLM) and ideally the
-  load generator on a separate host. *(This is benchmark fidelity, not a GPU
-  blocker — real vLLM would also give the end-to-end TTFT number.)*
-- **The Rust gateway currently does routing + streaming only**; the Python gateway
-  also runs metrics, tenancy, tracing, and logging per request. So part of the
-  c1 gap is "the Rust hot path does less work" — which is exactly the point of
-  *rewriting the latency-critical path* in Rust. A parity port (metrics/circuit/
-  tenancy in Rust) is planned; the architecture comparison stands either way.
+- **Rust does less per-request work than Python (yet).** The Rust gateway
+  currently implements routing + streaming + failover; the Python version also
+  runs Prometheus metrics, tenancy/rate-limiting, OpenTelemetry tracing, and
+  structured logging on every request. Some of the gap is *the Rust hot path
+  doing less* — which is exactly the point of *rewriting the latency-critical
+  path*. A parity port is planned; the architecture comparison stands regardless.
+- **Single-machine numbers.** The load generator, gateway, and backend share
+  one host. Absolute throughput would be higher on separate machines, but the
+  *relative* gap between Python and Rust gateways is the meaningful signal.
 
 ## Reproduce
 
 ```bash
-# fast backend
-MOCK_TOKEN_DELAY_S=0 MOCK_PREFILL_S_PER_BLOCK=0 \
-  python -m uvicorn mock_backend.app:app --host 127.0.0.1 --port 9001
+# fast Rust mock (backend ceiling ~43k req/s)
+cd rust && cargo build --release
+./target/release/mockbackend 127.0.0.1:9101
 
-# Python gateway
-GW_BACKENDS="b0=http://127.0.0.1:9001" \
+# choice 1 — Python gateway
+GW_BACKENDS="b0=http://127.0.0.1:9101" GW_LOG_LEVEL=WARNING \
   python -m uvicorn gateway.server:app --host 127.0.0.1 --port 8000
 
-# Rust gateway (release)
-cd rust && cargo build --release --bin gateway
-GW_BACKENDS="b0=http://127.0.0.1:9001" ./target/release/gateway   # :8000
+# choice 2 — Rust gateway (release)
+GW_BACKENDS="b0=http://127.0.0.1:9101" ./target/release/gateway   # :8000
 
-# measure (point --url at the backend, then each gateway)
-python bench/latency_bench.py --url http://127.0.0.1:9001 --n 400  --concurrency 1  --label direct
-python bench/latency_bench.py --url http://127.0.0.1:8000 --n 400  --concurrency 1  --label gateway
+# fast Rust load generator (point at the backend, then either gateway)
+./target/release/loadgen --url http://127.0.0.1:9101 --n 20000 -c 64  --label direct
+./target/release/loadgen --url http://127.0.0.1:8000 --n 20000 -c 64  --label gateway
 ```
