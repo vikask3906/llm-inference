@@ -10,8 +10,6 @@ from __future__ import annotations
                     TTFT (affinity + load) with saturation cutoff + hysteresis.
 """
 
-import math
-
 from .config import Config
 from .hashing import block_hashes
 from .load_tracker import LoadTracker
@@ -54,12 +52,11 @@ class Router:
             b = cands[key % len(cands)]
             return RouteResult(b, hashes, tokens, 0)
 
-        # prefix_tree (est-TTFT)
+        # prefix_tree: minimize estimated TTFT, then load-balance within hysteresis
         match = self.tree.match(hashes)
-        best_b, best_ttft, best_match = None, math.inf, 0
+        scored = []                            # (ttft, backend, match_blocks)
         saturated_fallback = None
         for b in cands:
-            m_blocks = match.get(b, 0)
             # --- guardrails: hard saturation cutoff (affinity yields to load) ---
             if self.load.kv_usage[b] > self.cfg.kv_pressure_cutoff or \
                self.load.inflight[b] > self.cfg.max_inflight:
@@ -67,15 +64,24 @@ class Router:
                    self.load.inflight[b] < self.load.inflight[saturated_fallback]:
                     saturated_fallback = b
                 continue
-            ttft = self._est_ttft(tokens, m_blocks, b)
-            # hysteresis: only switch if the alt beats current best by a margin
-            if ttft < best_ttft - (0 if best_b is None else self.cfg.hysteresis_ms):
-                best_b, best_ttft, best_match = b, ttft, m_blocks
+            m_blocks = match.get(b, 0)
+            scored.append((self._est_ttft(tokens, m_blocks, b), b, m_blocks))
 
-        if best_b is None:                     # everything saturated
-            best_b = saturated_fallback or cands[0]
-            best_match = match.get(best_b, 0)
-        return RouteResult(best_b, hashes, tokens, best_match)
+        if not scored:                         # everything saturated
+            b = saturated_fallback or cands[0]
+            return RouteResult(b, hashes, tokens, match.get(b, 0))
+
+        # Backends whose TTFT is within hysteresis of the best are "equivalent":
+        # spread across them by least-load (+ round-robin) so a tiny shared prefix
+        # (e.g. a common system prompt) doesn't pin all traffic to one node, while
+        # a large real affinity still keeps a single backend the sole winner.
+        min_ttft = min(s[0] for s in scored)
+        good = [(b, m) for (ttft, b, m) in scored if ttft <= min_ttft + self.cfg.hysteresis_ms]
+        min_load = min(self.load.inflight[b] for b, _ in good)
+        tied = [(b, m) for (b, m) in good if self.load.inflight[b] == min_load]
+        b, m_blocks = tied[self._rr % len(tied)]
+        self._rr += 1
+        return RouteResult(b, hashes, tokens, m_blocks)
 
     def _est_ttft(self, tokens: int, match_blocks: int, backend_id: str) -> float:
         cached_tokens = match_blocks * self.cfg.block_tokens
