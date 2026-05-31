@@ -253,14 +253,20 @@ async def scrape_loop(client: httpx.AsyncClient) -> None:
 
 
 async def cluster_sync_loop() -> None:
-    """Drain peers' radix-tree mutations into the local tree, off the hot path."""
+    """Drain peers' mutations into local state, off the hot path. Also re-asserts
+    this replica's load (every tick) and full drain map (anti-entropy, every
+    DIGEST_EVERY ticks) so late-joining / restarted replicas converge."""
     interval = max(0.02, cluster_cfg.sync_interval_ms / 1000.0)
+    DIGEST_EVERY = 8                       # ~2s at the 250ms default
+    tick = 0
     while True:
         try:
             # Publish this replica's load + locally-shed backends, then drain peers'.
             unhealthy = [b.id for b in registry.all()
                          if breaker.state_code(b.id) == 2 or not b.healthy]
             cluster.publish_load(dict(load.inflight), unhealthy)
+            if tick % DIGEST_EVERY == 0:
+                cluster.publish_drain_digest()      # anti-entropy
             applied = cluster.sync()
             metrics.set_gauge("gateway_cluster_peers", cluster.fleet.peers(),
                               help="Number of peer gateway replicas seen")
@@ -270,6 +276,7 @@ async def cluster_sync_loop() -> None:
                                     value=applied)
         except Exception:
             pass            # a transient bus error must never stop routing
+        tick += 1
         await asyncio.sleep(interval)
 
 

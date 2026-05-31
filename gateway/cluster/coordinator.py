@@ -17,7 +17,16 @@ replicas' traffic -- better than a single replica's view). Per-replica LRU
 eviction may diverge slightly; routing degrades gracefully, never breaks.
 """
 
-from .events import DRAIN, INSERT, REMOVE_BACKEND, UNDRAIN, LoadEvent, PrefixEvent, decode_event
+from .drain_state import DrainState
+from .events import (
+    INSERT,
+    REMOVE_BACKEND,
+    DrainDigest,
+    DrainEvent,
+    LoadEvent,
+    PrefixEvent,
+    decode_event,
+)
 from .fleet import FleetLoadView
 
 
@@ -34,6 +43,8 @@ class ClusterCoordinator:
         self._store = store
         # peers' load snapshots land here; the router reads it for fleet-wide load.
         self.fleet = fleet if fleet is not None else FleetLoadView()
+        # LWW drain map: source of truth the registry's draining flags reconcile to.
+        self._drain = DrainState()
         self._seq = 0
         # counters for /metrics + introspection
         self.published = 0
@@ -70,24 +81,43 @@ class ClusterCoordinator:
 
     def publish_drain(self, backend_id: str, draining: bool) -> None:
         """Tell peers to drain (or restore) a backend, so a maintenance decision
-        on this replica takes effect fleet-wide. Also write-through to the durable
-        snapshot so restarting / late-joining replicas don't miss it."""
+        on this replica takes effect fleet-wide. Versioned (LWW) so concurrent
+        drain/undrain converge; also write-through to the durable snapshot."""
+        ts = self._drain.set_local(backend_id, draining, self._replica_id)
         self._seq += 1
-        self._bus.publish(PrefixEvent(DRAIN if draining else UNDRAIN,
-                                      backend_id, self._replica_id, self._seq))
+        self._bus.publish(DrainEvent(self._replica_id, self._seq, ts,
+                                     backend_id, draining))
         if self._store is not None:
             self._store.record_drain(backend_id, draining)
+        self._reconcile_drains()
         self.published += 1
 
+    def publish_drain_digest(self) -> None:
+        """Broadcast this replica's full LWW drain map (anti-entropy). Lets a
+        late-joining / restarted replica converge with no central store."""
+        if len(self._drain) == 0:
+            return
+        self._seq += 1
+        self._bus.publish(DrainDigest(self._replica_id, self._seq, self._drain.digest()))
+        self.published += 1
+
+    def _reconcile_drains(self) -> None:
+        """Make the registry's draining flags match the LWW drain map."""
+        if self._registry is None:
+            return
+        drained = self._drain.drained()
+        for b in self._registry.all():
+            self._registry.set_draining(b.id, b.id in drained)
+
     def warm_start(self) -> set[str]:
-        """Seed this replica's drain state from the durable snapshot on boot, so a
-        restart or a late join doesn't route to a backend under maintenance.
-        Returns the set of backends drained."""
-        if self._store is None or self._registry is None:
+        """Seed drain state from the durable snapshot on boot, so a restart / late
+        join doesn't route to a backend under maintenance. Returns the drained set."""
+        if self._store is None:
             return set()
         drained = self._store.drained()
         for bid in drained:
-            self._registry.set_draining(bid, True)
+            self._drain.set_local(bid, True, self._replica_id)
+        self._reconcile_drains()
         return drained
 
     # ------------------------------------------------------------ sync path
@@ -96,16 +126,23 @@ class ClusterCoordinator:
         number of events applied. Safe to call repeatedly from a background loop.
         """
         events = self._bus.poll()
+        drains_changed = False
         for e in events:
             if isinstance(e, LoadEvent):
                 self.fleet.apply(e)
+            elif isinstance(e, DrainEvent):
+                if self._drain.apply(e.backend_id, e.draining, e.ts, e.origin):
+                    drains_changed = True
+            elif isinstance(e, DrainDigest):
+                if self._drain.merge(e.entries):
+                    drains_changed = True
             elif e.kind == INSERT:
                 self._tree.insert(e.hashes, e.backend_id)
             elif e.kind == REMOVE_BACKEND:
                 self._tree.remove_backend(e.backend_id)
-            elif e.kind in (DRAIN, UNDRAIN) and self._registry is not None:
-                self._registry.set_draining(e.backend_id, e.kind == DRAIN)
             self.applied_remote += 1
+        if drains_changed:
+            self._reconcile_drains()
         return len(events)
 
     def receive_gossip(self, raw_events) -> int:

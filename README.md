@@ -143,9 +143,10 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   draining / in-flight / KV usage / circuit / held prefix blocks). Enabled by
   `GW_ADMIN_TOKEN` (off by default). When clustered, a drain **propagates
   fleet-wide** over the replication bus, so one API call drains the backend on
-  every replica — and it's **durable**: a write-through snapshot (Redis set)
-  means a restarting or late-joining replica warm-starts the drain on boot
-  instead of routing to a node under maintenance.
+  every replica — and it **survives restarts / late joins**: on the Redis path a
+  write-through snapshot warm-starts the drain on boot; on the broker-less gossip
+  path a periodic **anti-entropy digest** (an LWW drain map that resolves
+  concurrent drain/undrain) converges any replica with no central store.
 - **RAG-aware routing** — structured RAG payloads are canonicalized (deduped,
   sorted chunks → identical prefix), routed by chunk-affinity (set-overlap) to
   the backend already holding the most chunks. Opt-in via `GW_RAG_ENABLED`.
@@ -180,7 +181,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 273 tests
+python -m pytest -q            # 278 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
@@ -276,8 +277,9 @@ for a complete file-by-file account of everything implemented.
 - Multi-replica gateway with **shared prefix + load + circuit + drain state** —
   **done ✓** ([`gateway/cluster/`](gateway/cluster/), `docker-compose.cluster.yml`):
   pluggable transport — Redis pub/sub **or** broker-less peer-to-peer HTTP
-  gossip — with durable drain snapshot + boot warm-start. Next: full anti-entropy
-  (periodic state reconcile) on the gossip path, and token-accurate per-route SLOs.
+  gossip with **LWW anti-entropy** — and durable drain (snapshot warm-start on
+  Redis, digest convergence on gossip). Next: token-accurate per-route SLO
+  tracking and a multi-replica architecture-diagram refresh in the design doc.
 - **Rust** hot-path rewrite ([`rust/`](rust/)): data-plane core + axum/reqwest
   streaming proxy done ✓ (20 core tests; e2e smoke-tested vs the mock backend);
   next port metrics/circuit/tenancy + the profiled before/after latency vs Python.

@@ -19,12 +19,17 @@ from .bus import (
 )
 from .config import ClusterConfig
 from .coordinator import ClusterCoordinator
+from .drain_state import DrainState
 from .events import (
     DRAIN,
+    DRAIN_DIGEST,
+    DRAIN_OP,
     INSERT,
     LOAD,
     REMOVE_BACKEND,
     UNDRAIN,
+    DrainDigest,
+    DrainEvent,
     LoadEvent,
     PrefixEvent,
     decode_event,
@@ -36,6 +41,9 @@ __all__ = [
     "ClusterConfig",
     "ClusterCoordinator",
     "FleetLoadView",
+    "DrainState",
+    "DrainEvent",
+    "DrainDigest",
     "ReplicationBus",
     "InMemoryBus",
     "InMemoryBroker",

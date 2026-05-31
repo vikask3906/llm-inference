@@ -22,6 +22,8 @@ REMOVE_BACKEND = "remove_backend"
 LOAD = "load"
 DRAIN = "drain"            # operator drained a backend on one replica -> tell peers
 UNDRAIN = "undrain"
+DRAIN_OP = "drainop"       # versioned (LWW) drain/undrain delta
+DRAIN_DIGEST = "draindigest"   # full LWW drain map for anti-entropy
 
 
 @dataclass
@@ -90,7 +92,56 @@ class LoadEvent:
         )
 
 
+@dataclass
+class DrainEvent:
+    """A versioned (LWW) drain/undrain op: `ts` is a Lamport timestamp,
+    `origin` the deterministic tie-breaker."""
+
+    origin: str
+    seq: int
+    ts: int
+    backend_id: str
+    draining: bool
+    kind: str = DRAIN_OP
+
+    def to_json(self) -> str:
+        return json.dumps({"k": DRAIN_OP, "o": self.origin, "s": self.seq,
+                           "t": self.ts, "b": self.backend_id,
+                           "d": 1 if self.draining else 0}, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes) -> "DrainEvent":
+        d = json.loads(raw)
+        return cls(origin=d["o"], seq=int(d["s"]), ts=int(d["t"]),
+                   backend_id=d["b"], draining=bool(d["d"]))
+
+
+@dataclass
+class DrainDigest:
+    """A replica's full LWW drain map, broadcast periodically for anti-entropy."""
+
+    origin: str
+    seq: int
+    entries: dict          # backend_id -> [draining, ts, owner]
+    kind: str = DRAIN_DIGEST
+
+    def to_json(self) -> str:
+        return json.dumps({"k": DRAIN_DIGEST, "o": self.origin, "s": self.seq,
+                           "e": self.entries}, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes) -> "DrainDigest":
+        d = json.loads(raw)
+        return cls(origin=d["o"], seq=int(d["s"]), entries=dict(d.get("e") or {}))
+
+
 def decode_event(raw: str | bytes):
-    """Deserialize either event type off the wire, dispatching on the 'k' tag."""
+    """Deserialize any event type off the wire, dispatching on the 'k' tag."""
     kind = json.loads(raw).get("k")
-    return LoadEvent.from_json(raw) if kind == LOAD else PrefixEvent.from_json(raw)
+    if kind == LOAD:
+        return LoadEvent.from_json(raw)
+    if kind == DRAIN_OP:
+        return DrainEvent.from_json(raw)
+    if kind == DRAIN_DIGEST:
+        return DrainDigest.from_json(raw)
+    return PrefixEvent.from_json(raw)
