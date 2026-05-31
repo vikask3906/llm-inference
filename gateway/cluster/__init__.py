@@ -12,7 +12,16 @@ loop. Disabled unless GW_CLUSTER_ENABLED=1.
 from .bus import InMemoryBroker, InMemoryBus, RedisBus, ReplicationBus, make_bus
 from .config import ClusterConfig
 from .coordinator import ClusterCoordinator
-from .events import INSERT, LOAD, REMOVE_BACKEND, LoadEvent, PrefixEvent, decode_event
+from .events import (
+    DRAIN,
+    INSERT,
+    LOAD,
+    REMOVE_BACKEND,
+    UNDRAIN,
+    LoadEvent,
+    PrefixEvent,
+    decode_event,
+)
 from .fleet import FleetLoadView
 
 __all__ = [
@@ -30,4 +39,6 @@ __all__ = [
     "INSERT",
     "REMOVE_BACKEND",
     "LOAD",
+    "DRAIN",
+    "UNDRAIN",
 ]

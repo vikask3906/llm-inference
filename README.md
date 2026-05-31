@@ -141,7 +141,9 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   maintenance (stops new routing to it while in-flight work finishes, without
   killing it), restore it, and inspect live routing state (per-backend health /
   draining / in-flight / KV usage / circuit / held prefix blocks). Enabled by
-  `GW_ADMIN_TOKEN` (off by default).
+  `GW_ADMIN_TOKEN` (off by default). When clustered, a drain **propagates
+  fleet-wide** over the replication bus, so one API call drains the backend on
+  every replica.
 - **RAG-aware routing** — structured RAG payloads are canonicalized (deduped,
   sorted chunks → identical prefix), routed by chunk-affinity (set-overlap) to
   the backend already holding the most chunks. Opt-in via `GW_RAG_ENABLED`.
@@ -175,7 +177,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 258 tests
+python -m pytest -q            # 261 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo

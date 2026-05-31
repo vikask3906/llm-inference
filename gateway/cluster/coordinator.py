@@ -17,16 +17,19 @@ replicas' traffic -- better than a single replica's view). Per-replica LRU
 eviction may diverge slightly; routing degrades gracefully, never breaks.
 """
 
-from .events import INSERT, REMOVE_BACKEND, LoadEvent, PrefixEvent
+from .events import DRAIN, INSERT, REMOVE_BACKEND, UNDRAIN, LoadEvent, PrefixEvent
 from .fleet import FleetLoadView
 
 
 class ClusterCoordinator:
     def __init__(self, tree, bus, replica_id: str,
-                 fleet: FleetLoadView | None = None) -> None:
+                 fleet: FleetLoadView | None = None, registry=None) -> None:
         self._tree = tree
         self._bus = bus
         self._replica_id = replica_id
+        # Optional backend registry: drain/undrain events from peers are applied
+        # here so a maintenance decision on one replica reaches the whole fleet.
+        self._registry = registry
         # peers' load snapshots land here; the router reads it for fleet-wide load.
         self.fleet = fleet if fleet is not None else FleetLoadView()
         self._seq = 0
@@ -63,6 +66,14 @@ class ClusterCoordinator:
                                     list(unhealthy or [])))
         self.published += 1
 
+    def publish_drain(self, backend_id: str, draining: bool) -> None:
+        """Tell peers to drain (or restore) a backend, so a maintenance decision
+        on this replica takes effect fleet-wide."""
+        self._seq += 1
+        self._bus.publish(PrefixEvent(DRAIN if draining else UNDRAIN,
+                                      backend_id, self._replica_id, self._seq))
+        self.published += 1
+
     # ------------------------------------------------------------ sync path
     def sync(self) -> int:
         """Apply all pending remote mutations to the local tree. Returns the
@@ -76,6 +87,8 @@ class ClusterCoordinator:
                 self._tree.insert(e.hashes, e.backend_id)
             elif e.kind == REMOVE_BACKEND:
                 self._tree.remove_backend(e.backend_id)
+            elif e.kind in (DRAIN, UNDRAIN) and self._registry is not None:
+                self._registry.set_draining(e.backend_id, e.kind == DRAIN)
             self.applied_remote += 1
         return len(events)
 

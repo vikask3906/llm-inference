@@ -155,7 +155,8 @@ cluster_cfg = ClusterConfig.from_env()
 cluster = None
 if cluster_cfg.enabled:
     try:
-        cluster = ClusterCoordinator(tree, make_bus(cluster_cfg), cluster_cfg.replica_id)
+        cluster = ClusterCoordinator(tree, make_bus(cluster_cfg), cluster_cfg.replica_id,
+                                     registry=registry)
         router.fleet = cluster.fleet   # router scores by fleet-wide (local+peer) load
     except Exception:
         cluster = None            # a bus init failure must not break the gateway
@@ -389,6 +390,8 @@ async def admin_drain(backend_id: str, request: Request):
         return guard
     if not registry.set_draining(backend_id, True):
         return JSONResponse({"error": f"unknown backend {backend_id!r}"}, status_code=404)
+    if cluster is not None:
+        cluster.publish_drain(backend_id, True)        # propagate fleet-wide
     metrics.inc_counter("gateway_admin_drain_total", help="Admin drain actions",
                         backend=backend_id, action="drain")
     log_event(log, "admin", action="drain", backend=backend_id)
@@ -402,6 +405,8 @@ async def admin_undrain(backend_id: str, request: Request):
         return guard
     if not registry.set_draining(backend_id, False):
         return JSONResponse({"error": f"unknown backend {backend_id!r}"}, status_code=404)
+    if cluster is not None:
+        cluster.publish_drain(backend_id, False)       # propagate fleet-wide
     metrics.inc_counter("gateway_admin_drain_total", help="Admin drain actions",
                         backend=backend_id, action="undrain")
     log_event(log, "admin", action="undrain", backend=backend_id)

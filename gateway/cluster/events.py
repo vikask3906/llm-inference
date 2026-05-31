@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 INSERT = "insert"
 REMOVE_BACKEND = "remove_backend"
 LOAD = "load"
+DRAIN = "drain"            # operator drained a backend on one replica -> tell peers
+UNDRAIN = "undrain"
 
 
 @dataclass
