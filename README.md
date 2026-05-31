@@ -89,6 +89,7 @@ Each extension ships with its own before/after benchmark, written up in
 | **Admission control** | `bench/admission_bench.py` | At **2× offered load**: baseline collapses to **2% gold-tier SLO compliance**, admission keeps gold at **100%** (bronze shed to 29% served, by design) — [`ADMISSION_RESULTS.md`](docs/benchmarks/ADMISSION_RESULTS.md) |
 | **Disaggregation** | `bench/disagg_bench.py` | Adaptive prefill/decode split is the **lower-latency envelope** — co-locates when idle (0% split, matches colocate), splits under load (**33% lower mean latency than colocate-only** at 8× load) — [`DISAGG_RESULTS.md`](docs/benchmarks/DISAGG_RESULTS.md) |
 | **Multimodal** | `bench/multimodal_bench.py` | Media-affinity hits **90% image-cache** vs round-robin's 81%, while staying **11× more load-balanced** than consistent-hash (CoV 0.01 vs 0.11) — best of both — [`MULTIMODAL_RESULTS.md`](docs/benchmarks/MULTIMODAL_RESULTS.md) |
+| **Cluster scaling** | `bench/cluster_bench.py` | Shared prefix state holds **~95% hit rate at any replica count**; unshared collapses **95%→55%** by 16 replicas (each replica learns only ~1/N of the prefix map) — [`CLUSTER_RESULTS.md`](docs/benchmarks/CLUSTER_RESULTS.md) |
 
 ## How it works
 

@@ -247,8 +247,9 @@ A faithful port of the per-request hot path — same behavior, ~52× throughput 
 ## 9. Validation
 
 - **Algorithm sims / matrices** — `bench/matrix.py` (+ dag/rag/admission/disagg/
-  multimodal benches): each routing mode has a before/after chart in
-  `docs/benchmarks/`.
+  multimodal/cluster benches): each routing mode has a before/after chart in
+  `docs/benchmarks/`. The cluster bench shows shared prefix state holds ~95% hit
+  rate at any replica count while unshared collapses to ~55% by 16 replicas.
 - **Real-vLLM GPU run** — 2× A40: prefix routing cuts mean TTFT **53%** at low
   load, **+10pp** cache hit rate (`docs/BENCHMARKS.md §D`,
   `bench/run_vllm_benchmark.sh`, runbook `docs/GPU_RUNBOOK.md`).

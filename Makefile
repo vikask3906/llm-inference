@@ -34,13 +34,14 @@ test:  ## run the test suite
 bench:  ## run the routing benchmark matrix (charts + CSV + markdown)
 	python bench/matrix.py
 
-bench-all:  ## run every standalone-package benchmark (matrix + dag + rag + admission + disagg + multimodal)
+bench-all:  ## run every benchmark (matrix + dag + rag + admission + disagg + multimodal + cluster)
 	python bench/matrix.py
 	python bench/dag_bench.py
 	python bench/rag_bench.py
 	python bench/admission_bench.py
 	python bench/disagg_bench.py
 	python bench/multimodal_bench.py
+	python bench/cluster_bench.py
 
 bench-dag:  ## DAG-scheduler benchmark: locality vs round-robin
 	python bench/dag_bench.py
@@ -56,3 +57,6 @@ bench-disagg:  ## Disaggregation benchmark: adaptive vs static colocate/split
 
 bench-multimodal:  ## Multimodal benchmark: media-affinity vs cache-blind
 	python bench/multimodal_bench.py
+
+bench-cluster:  ## Cluster-scaling benchmark: shared vs unshared prefix state
+	python bench/cluster_bench.py
