@@ -263,15 +263,19 @@ mock_backend/      fake vLLM (prefix cache sim + SSE + /health + /metrics)
 bench/             sim, e2e, fairness, load test, benchmark matrix
 scripts/           demo orchestrator + standalone package demos
 deploy/            Docker Compose + Prometheus + Grafana provisioning + Helm
+docs/ARCHITECTURE.md  visual map: diagrams + component→file map + coverage matrix
 docs/DESIGN.md     full design doc (architecture, trade-offs, roadmap)
 ```
 
 ## Design
 
-See **[docs/DESIGN.md](docs/DESIGN.md)** for the architecture, the routing
-algorithm (radix tree, eviction model, cost function), trade-offs, failure
-handling, and the Phase-2 roadmap — and **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)**
-for a complete file-by-file account of everything implemented.
+See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the full visual map —
+layered diagrams (system topology → request hot path → routing decision →
+control & cluster planes → observability → Rust parity) plus a component→file
+map and a feature-coverage matrix. **[docs/DESIGN.md](docs/DESIGN.md)** covers
+the routing algorithm (radix tree, eviction model, cost function), trade-offs,
+failure handling, and the roadmap; **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)**
+is the file-by-file account.
 
 ## Roadmap
 
