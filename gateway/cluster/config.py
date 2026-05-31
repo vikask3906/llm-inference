@@ -28,10 +28,15 @@ class ClusterConfig:
 
     # Transport for the mutation stream:
     #   memory -- in-process broker (single process; for tests / 1-process demos)
-    #   redis  -- Redis pub/sub (real multi-replica deployment)
+    #   redis  -- Redis pub/sub (a central broker; simple ops)
+    #   gossip -- peer-to-peer HTTP: replicas push events to each other directly,
+    #             NO broker. Set `peers` to the other replicas' base URLs.
     transport: str = "memory"
     redis_url: str = "redis://localhost:6379/0"
     channel: str = "gw:prefix"
+    # Comma-separated base URLs of the OTHER replicas (gossip transport only),
+    # e.g. "http://gw2:8000,http://gw3:8000". Self is excluded.
+    peers: str = ""
 
     # Background drain cadence (ms). The hot path only *buffers* a publish;
     # this loop flushes outbound + applies inbound, off the request path.

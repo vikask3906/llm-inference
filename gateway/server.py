@@ -338,6 +338,17 @@ async def autoscale_endpoint():
     })
 
 
+@app.post("/cluster/gossip")
+async def cluster_gossip(request: Request):
+    """Receive a batch of replication events pushed by a peer (gossip transport).
+    Network-internal: restrict to the replica subnet in deployment."""
+    if cluster is None:
+        return JSONResponse({"error": "cluster disabled"}, status_code=404)
+    body = await request.json()
+    n = cluster.receive_gossip(body.get("events") or [])
+    return {"accepted": n}
+
+
 # --- Control-plane admin API ------------------------------------------------
 # Disabled until GW_ADMIN_TOKEN is set; then every /admin/* call must present it
 # as `Authorization: Bearer <token>` or `X-Admin-Token: <token>`.

@@ -17,7 +17,7 @@ replicas' traffic -- better than a single replica's view). Per-replica LRU
 eviction may diverge slightly; routing degrades gracefully, never breaks.
 """
 
-from .events import DRAIN, INSERT, REMOVE_BACKEND, UNDRAIN, LoadEvent, PrefixEvent
+from .events import DRAIN, INSERT, REMOVE_BACKEND, UNDRAIN, LoadEvent, PrefixEvent, decode_event
 from .fleet import FleetLoadView
 
 
@@ -107,6 +107,22 @@ class ClusterCoordinator:
                 self._registry.set_draining(e.backend_id, e.kind == DRAIN)
             self.applied_remote += 1
         return len(events)
+
+    def receive_gossip(self, raw_events) -> int:
+        """Ingest raw event JSON pushed by a peer (gossip transport). Decoded
+        events are queued on the bus and applied on the next sync(). Returns the
+        number accepted. No-op if the transport isn't gossip."""
+        ingest = getattr(self._bus, "ingest", None)
+        if ingest is None:
+            return 0
+        decoded = []
+        for raw in raw_events or []:
+            try:
+                decoded.append(decode_event(raw))
+            except Exception:
+                continue
+        ingest(decoded)
+        return len(decoded)
 
     def close(self) -> None:
         self._bus.close()

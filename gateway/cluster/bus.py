@@ -135,6 +135,63 @@ class RedisBus(ReplicationBus):
             pass
 
 
+# --------------------------------------------------------------------------- #
+# Gossip transport (peer-to-peer HTTP, no broker)
+# --------------------------------------------------------------------------- #
+
+class HttpGossipBus(ReplicationBus):
+    """Broker-less transport: replicas push events directly to each other over
+    HTTP. `publish` buffers; `poll` flushes the buffer to every peer's
+    `/cluster/gossip` endpoint (best-effort, short timeout) and returns events
+    peers have pushed to us (deposited via `ingest` by the server endpoint).
+
+    Eventually consistent and loss-tolerant by design: a momentarily-unreachable
+    peer just misses a delta (and re-converges via the periodic load re-publish /
+    drain snapshot). Removes the Redis broker from live propagation.
+
+    `sender` is injectable so the gossip logic is testable in-process without
+    real sockets.
+    """
+
+    def __init__(self, peers: list[str], channel: str, replica_id: str,
+                 sender=None, timeout: float = 0.5) -> None:
+        self._peers = [p.rstrip("/") for p in peers if p.strip()]
+        self._channel = channel
+        self._replica_id = replica_id
+        self._timeout = timeout
+        self._outbox: deque[PrefixEvent] = deque()
+        self._inbox: deque = deque()
+        self._send = sender or self._http_send
+
+    def publish(self, event: PrefixEvent) -> None:
+        self._outbox.append(event)            # cheap; flushed in poll()
+
+    def ingest(self, events: list) -> None:
+        """Deposit events a peer pushed to us (called by the server endpoint).
+        Drops our own echoes in case a peer list accidentally includes self."""
+        self._inbox.extend(e for e in events if getattr(e, "origin", None) != self._replica_id)
+
+    def poll(self) -> list:
+        # 1) flush outbound to every peer (best-effort)
+        if self._outbox and self._peers:
+            batch = [e.to_json() for e in self._outbox]
+            for peer in self._peers:
+                try:
+                    self._send(peer, batch)
+                except Exception:
+                    pass                      # a down peer must never stall the loop
+        self._outbox.clear()
+        # 2) return inbound
+        got = list(self._inbox)
+        self._inbox.clear()
+        return got
+
+    def _http_send(self, peer: str, batch: list[str]) -> None:  # pragma: no cover - network
+        import httpx
+        httpx.post(f"{peer}/cluster/gossip", json={"events": batch},
+                   timeout=self._timeout)
+
+
 def make_bus(cfg, broker: InMemoryBroker | None = None) -> ReplicationBus:
     """Construct the transport named by cfg.transport.
 
@@ -143,4 +200,7 @@ def make_bus(cfg, broker: InMemoryBroker | None = None) -> ReplicationBus:
     """
     if cfg.transport == "redis":
         return RedisBus(cfg.redis_url, cfg.channel, cfg.replica_id)
+    if cfg.transport == "gossip":
+        peers = [p.strip() for p in cfg.peers.split(",") if p.strip()]
+        return HttpGossipBus(peers, cfg.channel, cfg.replica_id)
     return InMemoryBus(broker or InMemoryBroker(), cfg.replica_id)

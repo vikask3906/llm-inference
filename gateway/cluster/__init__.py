@@ -9,7 +9,14 @@ publish_insert/publish_remove on the write path, and sync() from a background
 loop. Disabled unless GW_CLUSTER_ENABLED=1.
 """
 
-from .bus import InMemoryBroker, InMemoryBus, RedisBus, ReplicationBus, make_bus
+from .bus import (
+    HttpGossipBus,
+    InMemoryBroker,
+    InMemoryBus,
+    RedisBus,
+    ReplicationBus,
+    make_bus,
+)
 from .config import ClusterConfig
 from .coordinator import ClusterCoordinator
 from .events import (
@@ -33,6 +40,7 @@ __all__ = [
     "InMemoryBus",
     "InMemoryBroker",
     "RedisBus",
+    "HttpGossipBus",
     "make_bus",
     "SnapshotStore",
     "InMemorySnapshotStore",
