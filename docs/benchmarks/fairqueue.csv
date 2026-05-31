@@ -1,0 +1,4 @@
+tier,weight,arrivals,fifo_completion,wfq_completion
+gold,3.0,601,0.514,1.000
+silver,2.0,1178,0.495,1.000
+bronze,1.0,4221,0.499,0.289

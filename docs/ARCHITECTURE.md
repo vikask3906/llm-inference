@@ -273,6 +273,7 @@ A faithful port of the per-request hot path — same behavior, ~52× throughput 
 | Strategies: round_robin / consistent_hash / prefix_tree / speculative | `router`, `extensions/speculative` | `GW_STRATEGY` | `test_server`, `test_speculative` |
 | Fault tolerance: circuit breaker + pre-byte failover | `circuit`, `server` | default | `test_circuit`, `test_server` |
 | Multi-tenant fairness (RPS+TPS+inflight, isolation) | `tenancy`, `hashing` | `GW_RATE_LIMIT_ENABLED` | `test_tenancy`, `test_server` |
+| Weighted fair queuing (start-time fair queuing) | `fairqueue` | (scheduling primitive) | `test_fairqueue`, `fairqueue_bench` |
 | **API-key auth** | `auth` | `GW_REQUIRE_AUTH` | `test_auth` |
 | **Token-accurate accounting** | `extensions/bpe_hashing` | `GW_TOKEN_ACCURATE_ACCOUNTING` | `test_token_accounting` |
 | SLO-aware admission + shedding | `admission/` | `GW_ADMISSION_ENABLED` | `test_admission`, `admission_bench` |

@@ -391,7 +391,8 @@ of the abuser — the core fairness property.
   cluster-propagated.
 
 **Next**
-- Weighted fair queuing across tenants (priority tiers beyond token buckets).
+- Weighted fair queuing ✓ (`gateway/fairqueue.py`, start-time fair queuing) —
+  next: wire it as an async admission queue under a live concurrency limit.
 - Rust parity for the remaining routing modes (admission ported ✓; RAG/disagg next).
 - vs-NGINX round-robin comparison panel in Grafana.
 - COW/epoch reclamation in the tree (path compression is implemented ✓).

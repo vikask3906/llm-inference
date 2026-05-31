@@ -90,6 +90,7 @@ Each extension ships with its own before/after benchmark, written up in
 | **Disaggregation** | `bench/disagg_bench.py` | Adaptive prefill/decode split is the **lower-latency envelope** — co-locates when idle (0% split, matches colocate), splits under load (**33% lower mean latency than colocate-only** at 8× load) — [`DISAGG_RESULTS.md`](docs/benchmarks/DISAGG_RESULTS.md) |
 | **Multimodal** | `bench/multimodal_bench.py` | Media-affinity hits **90% image-cache** vs round-robin's 81%, while staying **11× more load-balanced** than consistent-hash (CoV 0.01 vs 0.11) — best of both — [`MULTIMODAL_RESULTS.md`](docs/benchmarks/MULTIMODAL_RESULTS.md) |
 | **Cluster scaling** | `bench/cluster_bench.py` | Shared prefix state holds **~95% hit rate at any replica count**; unshared collapses **95%→55%** by 16 replicas (each replica learns only ~1/N of the prefix map) — [`CLUSTER_RESULTS.md`](docs/benchmarks/CLUSTER_RESULTS.md) |
+| **Weighted fair queue** | `bench/fairqueue_bench.py` | Under a bronze flood, FIFO drags gold to **51%** completion; WFQ keeps gold + silver at **100%** and makes greedy bronze absorb the shortfall — [`FAIRQUEUE_RESULTS.md`](docs/benchmarks/FAIRQUEUE_RESULTS.md) |
 
 ## How it works
 
@@ -136,7 +137,10 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   isolation (routing seed + backend `cache_salt`) to close the cross-tenant TTFT
   side channel. Optional **token-accurate accounting** (`GW_TOKEN_ACCURATE_ACCOUNTING`)
   counts real tokenizer tokens for quota/admission instead of the `chars/4`
-  heuristic (which is off by 2-3× on code / non-English).
+  heuristic (which is off by 2-3× on code / non-English). A **weighted fair
+  queue** ([`gateway/fairqueue.py`](gateway/fairqueue.py), start-time fair
+  queuing) shares scarce dispatch slots by tier weight so a greedy tenant can't
+  starve premium SLOs.
 - **Observability** — structured JSON logs (request_id + trace_id), Prometheus
   `/metrics`, OpenTelemetry traces, and a provisioned Grafana dashboard.
   **Per-route SLO**: per-model TTFT + total-latency histograms
@@ -190,7 +194,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 291 tests
+python -m pytest -q            # 296 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
