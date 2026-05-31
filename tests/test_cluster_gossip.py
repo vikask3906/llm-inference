@@ -123,3 +123,27 @@ def test_gossip_endpoint_404_when_cluster_disabled():
             r = await c.post("/cluster/gossip", json={"events": []})
             assert r.status_code == 404
     asyncio.run(run())
+
+
+def test_gossip_endpoint_requires_secret_when_configured():
+    async def run():
+        gw.cluster = ClusterCoordinator(
+            RadixTree(CAP), HttpGossipBus([], "ch", "S", sender=lambda p, b: None), "S")
+        gw.cluster_cfg.secret = "topsecret"
+        ev = PrefixEvent(INSERT, "b0", "peer", 1, [1, 2]).to_json()
+        try:
+            async with _gwclient() as c:
+                # no secret -> 403
+                assert (await c.post("/cluster/gossip", json={"events": [ev]})).status_code == 403
+                # wrong secret -> 403
+                bad = await c.post("/cluster/gossip", json={"events": [ev]},
+                                   headers={"x-cluster-secret": "nope"})
+                assert bad.status_code == 403
+                # correct secret -> 200
+                ok = await c.post("/cluster/gossip", json={"events": [ev]},
+                                  headers={"x-cluster-secret": "topsecret"})
+                assert ok.status_code == 200 and ok.json()["accepted"] == 1
+        finally:
+            gw.cluster_cfg.secret = ""
+            gw.cluster = None
+    asyncio.run(run())

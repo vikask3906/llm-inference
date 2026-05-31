@@ -154,11 +154,12 @@ class HttpGossipBus(ReplicationBus):
     """
 
     def __init__(self, peers: list[str], channel: str, replica_id: str,
-                 sender=None, timeout: float = 0.5) -> None:
+                 sender=None, timeout: float = 0.5, secret: str = "") -> None:
         self._peers = [p.rstrip("/") for p in peers if p.strip()]
         self._channel = channel
         self._replica_id = replica_id
         self._timeout = timeout
+        self._secret = secret
         self._outbox: deque[PrefixEvent] = deque()
         self._inbox: deque = deque()
         self._send = sender or self._http_send
@@ -188,8 +189,9 @@ class HttpGossipBus(ReplicationBus):
 
     def _http_send(self, peer: str, batch: list[str]) -> None:  # pragma: no cover - network
         import httpx
+        headers = {"X-Cluster-Secret": self._secret} if self._secret else {}
         httpx.post(f"{peer}/cluster/gossip", json={"events": batch},
-                   timeout=self._timeout)
+                   headers=headers, timeout=self._timeout)
 
 
 def make_bus(cfg, broker: InMemoryBroker | None = None) -> ReplicationBus:
@@ -202,5 +204,6 @@ def make_bus(cfg, broker: InMemoryBroker | None = None) -> ReplicationBus:
         return RedisBus(cfg.redis_url, cfg.channel, cfg.replica_id)
     if cfg.transport == "gossip":
         peers = [p.strip() for p in cfg.peers.split(",") if p.strip()]
-        return HttpGossipBus(peers, cfg.channel, cfg.replica_id)
+        return HttpGossipBus(peers, cfg.channel, cfg.replica_id,
+                             secret=getattr(cfg, "secret", ""))
     return InMemoryBus(broker or InMemoryBroker(), cfg.replica_id)

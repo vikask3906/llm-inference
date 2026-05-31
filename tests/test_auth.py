@@ -5,7 +5,7 @@ import asyncio
 import httpx
 
 import gateway.server as gw
-from gateway.auth import INVALID, MISSING, Authenticator, extract_bearer, parse_api_keys
+from gateway.auth import INVALID, MISSING, Authenticator, extract_bearer, parse_api_keys, sha256_hex
 from gateway.backends import BackendRegistry
 from gateway.circuit import CircuitBreaker
 from gateway.load_tracker import LoadTracker
@@ -34,6 +34,21 @@ def test_invalid_key_rejected_and_valid_accepted():
     a = Authenticator({"sk-good"}, require=True)
     assert a.check({"authorization": "Bearer sk-bad"}) == (False, INVALID)
     assert a.check({"authorization": "Bearer sk-good"}) == (True, None)
+
+
+def test_hashed_key_authenticates_without_plaintext():
+    # operator configures ONLY the sha256 hash; the plaintext key never appears
+    key = "sk-live-abc123"
+    a = Authenticator(set(), require=True, valid_hashes={sha256_hex(key)})
+    assert a.check({"authorization": f"Bearer {key}"}) == (True, None)
+    assert a.check({"authorization": "Bearer sk-wrong"}) == (False, INVALID)
+
+
+def test_hash_and_plaintext_sets_both_accepted():
+    a = Authenticator({"plain-key"}, require=True, valid_hashes={sha256_hex("hashed-key")})
+    assert a.is_valid("plain-key")
+    assert a.is_valid("hashed-key")
+    assert not a.is_valid("neither")
 
 
 def test_extract_bearer_and_parse_keys():

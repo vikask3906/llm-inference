@@ -127,9 +127,10 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   auto-recovery) and safe pre-first-byte failover (mid-stream errors propagate, no
   duplicated tokens).
 - **Authentication** — opt-in API-key auth (`GW_REQUIRE_AUTH`): a request must
-  carry `Authorization: Bearer <key>` with a key in the valid set (tenant keys +
-  `GW_API_KEYS`) or it's rejected `401` with `WWW-Authenticate`. Reuses the
-  tenant-key scheme, so an authenticated key still resolves to its tier.
+  carry `Authorization: Bearer <key>` with a key in the valid set or it's
+  rejected `401`. Keys can be **pre-hashed** (`GW_API_KEY_HASHES`, sha256) so
+  plaintext never lives in the gateway's config; constant-time comparison.
+  Reuses the tenant-key scheme, so an authenticated key still resolves to its tier.
 - **Multi-tenant fairness** — per-tenant RPS + TPS token buckets (OpenAI RPM+TPM
   style) + in-flight caps, `429` with `Retry-After`, and per-tenant prefix
   isolation (routing seed + backend `cache_salt`) to close the cross-tenant TTFT
@@ -178,7 +179,8 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   prefix — and (b) per-backend *load + circuit state* — so the cost function
   scores by fleet-wide in-flight and two replicas don't stampede the same
   "least-loaded" node. Reads stay local; only writes fan out. Opt-in via
-  `GW_CLUSTER_ENABLED` — see [Horizontal scaling](#horizontal-scaling-multi-replica).
+  `GW_CLUSTER_ENABLED` (the gossip `/cluster/gossip` endpoint is authenticated by
+  a shared `GW_CLUSTER_SECRET`) — see [Horizontal scaling](#horizontal-scaling-multi-replica).
 - **OpenAI-compatible** — `POST /v1/chat/completions` with SSE streaming.
 
 ## Quickstart
@@ -186,7 +188,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 281 tests
+python -m pytest -q            # 284 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo

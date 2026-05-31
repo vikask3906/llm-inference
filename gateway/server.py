@@ -86,7 +86,8 @@ tenants = TenantRegistry(cfg.tenants)
 limiter = RateLimiter()
 # API-key auth (opt-in): valid set = configured tenant keys + extra GW_API_KEYS.
 # require=False by default, so check() is a no-op and the gateway stays open.
-authenticator = Authenticator(tenants.keys() | parse_api_keys(cfg.api_keys), cfg.require_auth)
+authenticator = Authenticator(tenants.keys() | parse_api_keys(cfg.api_keys),
+                              cfg.require_auth, parse_api_keys(cfg.api_key_hashes))
 log = configure_logging(cfg.log_level)
 
 # LoRA-aware routing: attach declared adapters to the backend objects so the
@@ -355,6 +356,9 @@ async def cluster_gossip(request: Request):
     Network-internal: restrict to the replica subnet in deployment."""
     if cluster is None:
         return JSONResponse({"error": "cluster disabled"}, status_code=404)
+    if cluster_cfg.secret and not hmac.compare_digest(
+            request.headers.get("x-cluster-secret", ""), cluster_cfg.secret):
+        return JSONResponse({"error": "invalid cluster secret"}, status_code=403)
     body = await request.json()
     n = cluster.receive_gossip(body.get("events") or [])
     return {"accepted": n}

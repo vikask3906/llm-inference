@@ -90,10 +90,16 @@ def test_rate_limited_request_emits_error_span():
         gw.limiter = RateLimiter()
         async with _gwclient() as c:
             hdr = {"authorization": "Bearer sk-x"}
-            for _ in range(12):
-                await c.post("/v1/chat/completions",
-                             json={"model": "mock-model", "messages": _msgs(), "max_tokens": 8},
-                             headers=hdr)
+
+            async def one():
+                return await c.post(
+                    "/v1/chat/completions",
+                    json={"model": "mock-model", "messages": _msgs(), "max_tokens": 8},
+                    headers=hdr)
+
+            # Fire concurrently so all 12 hit the rps gate before the 5/sec bucket
+            # refills -- otherwise slow sequential requests never trip the limit.
+            await asyncio.gather(*[one() for _ in range(12)])
         await gw.app.state.client.aclose()
         spans = _completion_spans()
         codes = [s.attributes.get("http.status_code") for s in spans]

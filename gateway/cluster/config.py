@@ -37,6 +37,10 @@ class ClusterConfig:
     # Comma-separated base URLs of the OTHER replicas (gossip transport only),
     # e.g. "http://gw2:8000,http://gw3:8000". Self is excluded.
     peers: str = ""
+    # Shared secret authenticating peer gossip. When set, outbound pushes carry it
+    # (X-Cluster-Secret) and POST /cluster/gossip rejects requests without it, so a
+    # rogue host can't inject routing state. Empty = trust the network (set it in prod).
+    secret: str = ""
 
     # Background drain cadence (ms). The hot path only *buffers* a publish;
     # this loop flushes outbound + applies inbound, off the request path.
