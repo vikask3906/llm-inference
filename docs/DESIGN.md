@@ -89,6 +89,66 @@ be fast; metric scraping and table maintenance are off the critical path.
 - `logging_setup` — structured JSON logs, one line per request, carrying
   `request_id` + `trace_id` so logs correlate with traces and metrics.
 - `server` — async reverse proxy + SSE streaming + failover + control-plane loop.
+- `auth` — optional API-key gate (`GW_REQUIRE_AUTH`); reuses tenant keys.
+- `cluster/*` — multi-replica state replication (see §3a).
+
+---
+
+## 3a. Horizontal scaling (multi-replica cluster)
+
+One gateway holds its radix tree, load counters, and circuit state **in-process**,
+so a second replica behind a load balancer would route blind and two replicas
+would stampede the same "least-loaded" backend. The cluster layer
+(`gateway/cluster/`, opt-in via `GW_CLUSTER_ENABLED`) makes the fleet share state
+while keeping **reads local and fast** — only *writes* fan out.
+
+```
+                         ┌── load balancer (nginx) ──┐
+              client ───▶│   round-robins replicas   │
+                         └───────┬───────────┬───────┘
+                                 ▼           ▼
+                          ┌───────────┐ ┌───────────┐
+                          │ gateway 1 │ │ gateway 2 │   ... N replicas
+                          │ local tree│ │ local tree│   (fast local reads)
+                          └─────┬─────┘ └─────┬─────┘
+                                │  replication bus  │     transport is pluggable:
+                                └───────┬───────────┘       • redis pub/sub, OR
+                                        │                    • peer-to-peer HTTP gossip
+                                        ▼                      (POST /cluster/gossip)
+                         shared, eventually-consistent state
+                         ┌────────────────────────────────────────────────┐
+                         │ prefix→backend mutations  (tree insert / remove)│
+                         │ per-backend load          (fleet-wide in-flight)│
+                         │ circuit / health          (peer-shed backends)  │
+                         │ drain intent              (LWW map + anti-entropy)│
+                         └────────────────────────────────────────────────┘
+```
+
+**What's replicated & why**
+- **Prefix mutations** — each replica applies peers' `tree.insert` / `remove`, so
+  every replica converges on which backend holds which prefix. A replica's tree
+  becomes the *union* of the fleet's inserts, which models the backend's real
+  cache (it serves all replicas) better than any single replica's view.
+- **Load** — replicas publish per-backend in-flight; the router scores by
+  `local + peers'` in-flight, closing the cross-replica thundering-herd hole.
+- **Circuit/health** — a backend a peer has shed is treated as saturated here.
+- **Drain** — operator maintenance intent, as an **LWW-Map CRDT**
+  (`(draining, lamport_ts, origin)` per backend) so concurrent drain/undrain
+  converge; a periodic **digest** (anti-entropy) converges restarted / late-joining
+  replicas with no central store.
+
+**Transports** (`ReplicationBus` interface, `GW_CLUSTER_TRANSPORT`): `redis`
+(central pub/sub, simple ops) or `gossip` (broker-less; replicas push events to
+each other's `/cluster/gossip` — zero external dependencies). The hot path only
+*buffers* a publish (cheap, non-blocking); a background loop flushes outbound +
+applies inbound + emits the anti-entropy digest.
+
+**Consistency**: eventual. A momentarily-unreachable peer misses a delta and
+re-converges via the periodic load re-publish / drain digest. Reads never block
+on the network; a bus error degrades to local-only routing, never an outage.
+Durable drain across a *full*-fleet restart uses the Redis snapshot
+(write-through + boot `warm_start`); the gossip path relies on anti-entropy among
+the surviving replicas.
 
 ---
 
@@ -307,22 +367,35 @@ of the abuser — the core fairness property.
 
 ---
 
-## 13. Roadmap (Phase 2+)
-- Real **vLLM** on ≥2 cheap cloud GPUs; fit the bilinear cost model from timings.
-- Observability triad complete: structured JSON logs ✓, Prometheus `/metrics` ✓,
-  OpenTelemetry tracing ✓, and a provisioned **Grafana dashboard** ✓
-  (`docker compose up` → Grafana :3000, Prometheus :9090); next: a vs-NGINX
-  round-robin comparison panel.
-- **Rust** hot-path rewrite (`rust/`): data-plane core ✓ (20 tests) + axum/reqwest
-  streaming proxy ✓ (e2e smoke-tested); next port metrics/circuit/tenancy, then a
-  profiled latency/throughput comparison vs the Python baseline.
+## 13. Roadmap — delivered ✓ / next
+
+**Delivered**
+- Real **vLLM** GPU validation ✓ — 2× A40, vLLM 0.7.3: prefix routing cuts mean
+  TTFT **53%** at low load and lifts the vLLM prefix-cache hit rate **+10 pp**;
+  the win is traded for balance as concurrency rises (see [`BENCHMARKS.md §D`](BENCHMARKS.md)).
+- Observability triad ✓ (JSON logs + Prometheus + OTel + Grafana) plus
+  **per-route SLO histograms** (per-model TTFT / total latency) + violation counter.
+- **Rust** hot-path rewrite ✓ — full parity (metrics/circuit/failover/tenancy/
+  logging); ~52× throughput / ~33× lower p99 vs Python ([`BENCHMARKS.md`](BENCHMARKS.md)).
+- **Multi-replica gateway** ✓ — shared prefix + load + circuit + drain state over
+  a pluggable bus (Redis pub/sub **or** broker-less gossip with LWW anti-entropy);
+  durable drain (snapshot warm-start / digest convergence). See §3a.
+- **Heterogeneous fleet** ✓ — model filter → affinity+load; LoRA + multimodal
+  capability filters.
+- **Multi-tenant fairness** ✓ — per-tenant RPS+TPS + in-flight caps + prefix
+  isolation; **API-key auth** + **SLO-aware admission** (priority shedding).
+- **Disaggregated prefill/decode** ✓ + RAG chunk-affinity + DAG locality scheduler
+  + SLO autoscaler — each a standalone package wired behind a default-OFF flag
+  with its own before/after benchmark (`docs/benchmarks/`).
+- **Control plane** ✓ — token-guarded `/admin/*` drain + state inspection,
+  cluster-propagated.
+
+**Next**
+- Weighted fair queuing across tenants (priority tiers beyond token buckets).
+- Rust parity for the newer routing modes (admission is the natural first port).
+- vs-NGINX round-robin comparison panel in Grafana.
 - COW/epoch reclamation in the tree (path compression is implemented ✓).
-- **Multi-replica gateway:** shared prefix state (here `etcd`/Redis earns its
-  place) or a deterministic shared hash ring to keep prefix routing consistent.
-- **Heterogeneous fleet:** route by model first, then affinity+load.
-- **Multi-tenant fairness:** per-tenant RPS+TPS limits, in-flight caps, prefix
-  isolation ✓; next: weighted fair queuing across tenants, priority tiers.
-- **Disaggregated prefill/decode** routing (DistServe-style) as a routing axis.
+- Token-accurate hashing on by default once the tokenizer cost is amortized.
 
 ---
 
@@ -337,5 +410,11 @@ of the abuser — the core fairness property.
 - Language choice as a *measured* optimization (Python baseline → Rust hot path).
 - Instrumenting the gateway's own added latency (routing-latency histogram) to
   back the "<2ms overhead" claim with data rather than assertion.
+- Scaling prefix-aware routing horizontally: replicate *writes* (tree mutations,
+  load, drain), keep *reads* local — and why drain needs an LWW-Map CRDT +
+  anti-entropy rather than a naive union (concurrent drain/undrain convergence).
+- Picking eventual consistency for routing state on purpose: a stale peer biases
+  *away* from the backends it was using (the safe direction), and a bus outage
+  degrades to local-only routing instead of failing requests.
 - Why TPS (not RPS) is the fair unit for LLM quotas, and isolating per-tenant KV
   cache (routing seed + `cache_salt`) to close the cross-tenant TTFT side channel.
