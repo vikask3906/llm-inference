@@ -137,6 +137,10 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   heuristic (which is off by 2-3× on code / non-English).
 - **Observability** — structured JSON logs (request_id + trace_id), Prometheus
   `/metrics`, OpenTelemetry traces, and a provisioned Grafana dashboard.
+  **Per-route SLO**: per-model TTFT + total-latency histograms
+  (`gateway_ttft_seconds` / `gateway_request_duration_seconds`, labeled by
+  model → p50/p95/p99 per route) and an optional TTFT-budget violation counter
+  (`GW_SLO_TTFT_MS`).
 - **Control plane** — token-guarded `/admin/*` API to **drain a backend** for
   maintenance (stops new routing to it while in-flight work finishes, without
   killing it), restore it, and inspect live routing state (per-backend health /
@@ -181,7 +185,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 278 tests
+python -m pytest -q            # 281 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo

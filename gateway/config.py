@@ -107,6 +107,11 @@ class Config:
 
     # --- Observability ---
     log_level: str = "INFO"
+    # Per-route SLO: when > 0, requests whose TTFT exceeds this (ms) increment
+    # gateway_slo_violations_total{model}. The TTFT + total-latency histograms
+    # (gateway_ttft_seconds / gateway_request_duration_seconds, labeled by model)
+    # are always emitted regardless. 0 = no violation counting.
+    slo_ttft_ms: float = 0.0
 
     # --- Backends (used by the HTTP layer) ---
     # Comma-separated "id=url" pairs, all assumed to serve `default_model`.

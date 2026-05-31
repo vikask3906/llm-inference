@@ -162,6 +162,10 @@ if cluster_cfg.enabled:
     except Exception:
         cluster = None            # a bus init failure must not break the gateway
 
+# Latency histogram buckets (seconds) for per-route SLO metrics -- wider than the
+# default LATENCY_BUCKETS so real TTFT / total-latency tails land in a bucket.
+SLO_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+
 
 def _trace_id(span) -> str | None:
     tid = span.get_span_context().trace_id
@@ -889,6 +893,20 @@ async def chat_completions(request: Request):
             # reconcile TPS: actual streamed tokens vs the reserved estimate
             actual_output = max(0, out_events - 1)     # minus the [DONE] event
             release(actual_output)
+            # Per-route SLO metrics: TTFT + total-latency distributions per model
+            # (Prometheus histograms -> p50/p95/p99 per route via histogram_quantile).
+            model_label = str(model)
+            if first_byte_ms is not None:
+                metrics.observe("gateway_ttft_seconds", first_byte_ms / 1000.0,
+                                buckets=SLO_BUCKETS,
+                                help="Time-to-first-token (s) per model", model=model_label)
+                if cfg.slo_ttft_ms > 0 and first_byte_ms > cfg.slo_ttft_ms:
+                    metrics.inc_counter("gateway_slo_violations_total",
+                                        help="Requests exceeding the TTFT SLO",
+                                        model=model_label)
+            metrics.observe("gateway_request_duration_seconds",
+                            time.perf_counter() - t_request, buckets=SLO_BUCKETS,
+                            help="Total request duration (s) per model", model=model_label)
             span.set_attribute("output.tokens", actual_output)
             span.set_status(Status(StatusCode.OK))
             span.end()
