@@ -271,7 +271,8 @@ async def cluster_sync_loop() -> None:
                          if breaker.state_code(b.id) == 2 or not b.healthy]
             cluster.publish_load(dict(load.inflight), unhealthy)
             if tick % DIGEST_EVERY == 0:
-                cluster.publish_drain_digest()      # anti-entropy
+                cluster.publish_drain_digest()       # drain anti-entropy
+                cluster.publish_membership_digest()  # membership anti-entropy
             applied = cluster.sync()
             metrics.set_gauge("gateway_cluster_peers", cluster.fleet.peers(),
                               help="Number of peer gateway replicas seen")

@@ -21,16 +21,17 @@ from .drain_state import DrainState
 from .events import (
     INSERT,
     MEMBER_ADD,
-    MEMBER_REMOVE,
     REMOVE_BACKEND,
     DrainDigest,
     DrainEvent,
     LoadEvent,
     MemberEvent,
+    MembershipDigest,
     PrefixEvent,
     decode_event,
 )
 from .fleet import FleetLoadView
+from .membership_state import MembershipState
 
 
 class ClusterCoordinator:
@@ -48,6 +49,8 @@ class ClusterCoordinator:
         self.fleet = fleet if fleet is not None else FleetLoadView()
         # LWW drain map: source of truth the registry's draining flags reconcile to.
         self._drain = DrainState()
+        # LWW membership map: runtime backend add/removes the registry reconciles to.
+        self._membership = MembershipState()
         self._seq = 0
         # counters for /metrics + introspection
         self.published = 0
@@ -96,15 +99,39 @@ class ClusterCoordinator:
         self.published += 1
 
     def publish_member_add(self, backend_id: str, url: str, model: str = "") -> None:
+        ts = self._membership.set_local(backend_id, True, url, model, self._replica_id)
         self._seq += 1
         self._bus.publish(MemberEvent(self._replica_id, self._seq, MEMBER_ADD,
-                                      backend_id, url, model))
+                                      backend_id, url, model, ts))
         self.published += 1
 
     def publish_member_remove(self, backend_id: str) -> None:
+        ts = self._membership.set_local(backend_id, False, "", "", self._replica_id)
         self._seq += 1
-        self._bus.publish(MemberEvent(self._replica_id, self._seq, MEMBER_REMOVE, backend_id))
+        self._bus.publish(MemberEvent(self._replica_id, self._seq, "member_remove",
+                                      backend_id, "", "", ts))
         self.published += 1
+
+    def publish_membership_digest(self) -> None:
+        """Broadcast the full LWW membership map (anti-entropy) so a restarted /
+        late-joining replica converges on runtime backend add/removes."""
+        if len(self._membership) == 0:
+            return
+        self._seq += 1
+        self._bus.publish(MembershipDigest(self._replica_id, self._seq,
+                                           self._membership.digest()))
+        self.published += 1
+
+    def _reconcile_membership(self) -> None:
+        """Make the registry match the LWW membership map (runtime deltas only;
+        startup-config backends not in the map are left untouched)."""
+        if self._registry is None:
+            return
+        for bid, (url, model) in self._membership.present().items():
+            self._registry.add(bid, url, model or None)
+        for bid in self._membership.removed():
+            if self._registry.remove(bid):
+                self._tree.remove_backend(bid)
 
     def publish_drain_digest(self) -> None:
         """Broadcast this replica's full LWW drain map (anti-entropy). Lets a
@@ -141,6 +168,7 @@ class ClusterCoordinator:
         """
         events = self._bus.poll()
         drains_changed = False
+        members_changed = False
         for e in events:
             if isinstance(e, LoadEvent):
                 self.fleet.apply(e)
@@ -151,12 +179,12 @@ class ClusterCoordinator:
                 if self._drain.merge(e.entries):
                     drains_changed = True
             elif isinstance(e, MemberEvent):
-                if self._registry is not None:
-                    if e.action == MEMBER_ADD:
-                        self._registry.add(e.backend_id, e.url, e.model or None)
-                    else:
-                        self._registry.remove(e.backend_id)
-                        self._tree.remove_backend(e.backend_id)
+                if self._membership.apply(e.backend_id, e.action == MEMBER_ADD,
+                                          e.url, e.model, e.ts, e.origin):
+                    members_changed = True
+            elif isinstance(e, MembershipDigest):
+                if self._membership.merge(e.entries):
+                    members_changed = True
             elif e.kind == INSERT:
                 self._tree.insert(e.hashes, e.backend_id)
             elif e.kind == REMOVE_BACKEND:
@@ -164,6 +192,8 @@ class ClusterCoordinator:
             self.applied_remote += 1
         if drains_changed:
             self._reconcile_drains()
+        if members_changed:
+            self._reconcile_membership()
         return len(events)
 
     def receive_gossip(self, raw_events) -> int:

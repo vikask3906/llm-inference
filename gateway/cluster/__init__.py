@@ -27,6 +27,7 @@ from .events import (
     INSERT,
     LOAD,
     MEMBER_ADD,
+    MEMBER_DIGEST,
     MEMBER_REMOVE,
     REMOVE_BACKEND,
     UNDRAIN,
@@ -34,10 +35,12 @@ from .events import (
     DrainEvent,
     LoadEvent,
     MemberEvent,
+    MembershipDigest,
     PrefixEvent,
     decode_event,
 )
 from .fleet import FleetLoadView
+from .membership_state import MembershipState
 from .snapshot import InMemorySnapshotStore, RedisSnapshotStore, SnapshotStore, make_store
 
 __all__ = [
@@ -48,6 +51,8 @@ __all__ = [
     "DrainEvent",
     "DrainDigest",
     "MemberEvent",
+    "MembershipDigest",
+    "MembershipState",
     "ReplicationBus",
     "InMemoryBus",
     "InMemoryBroker",

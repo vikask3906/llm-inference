@@ -26,6 +26,7 @@ DRAIN_OP = "drainop"       # versioned (LWW) drain/undrain delta
 DRAIN_DIGEST = "draindigest"   # full LWW drain map for anti-entropy
 MEMBER_ADD = "member_add"      # runtime fleet membership: add a backend
 MEMBER_REMOVE = "member_remove"  # ... or remove one
+MEMBER_DIGEST = "member_digest"  # full LWW membership map for anti-entropy
 
 
 @dataclass
@@ -139,7 +140,8 @@ class DrainDigest:
 
 @dataclass
 class MemberEvent:
-    """Runtime fleet-membership change: add or remove a backend."""
+    """A versioned (LWW) runtime fleet-membership change: add or remove a backend.
+    `ts` is a Lamport timestamp so concurrent add/remove converge."""
 
     origin: str
     seq: int
@@ -147,6 +149,7 @@ class MemberEvent:
     backend_id: str
     url: str = ""
     model: str = ""
+    ts: int = 0
 
     @property
     def kind(self) -> str:
@@ -154,14 +157,33 @@ class MemberEvent:
 
     def to_json(self) -> str:
         return json.dumps({"k": self.action, "o": self.origin, "s": self.seq,
-                           "b": self.backend_id, "u": self.url, "m": self.model},
-                          separators=(",", ":"))
+                           "b": self.backend_id, "u": self.url, "m": self.model,
+                           "t": self.ts}, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, raw: str | bytes) -> "MemberEvent":
         d = json.loads(raw)
-        return cls(origin=d["o"], seq=int(d["s"]), action=d["k"],
-                   backend_id=d["b"], url=d.get("u", ""), model=d.get("m", ""))
+        return cls(origin=d["o"], seq=int(d["s"]), action=d["k"], backend_id=d["b"],
+                   url=d.get("u", ""), model=d.get("m", ""), ts=int(d.get("t", 0)))
+
+
+@dataclass
+class MembershipDigest:
+    """A replica's full LWW membership map, broadcast periodically for anti-entropy."""
+
+    origin: str
+    seq: int
+    entries: dict          # backend_id -> [present, url, model, ts, owner]
+    kind: str = MEMBER_DIGEST
+
+    def to_json(self) -> str:
+        return json.dumps({"k": MEMBER_DIGEST, "o": self.origin, "s": self.seq,
+                           "e": self.entries}, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes) -> "MembershipDigest":
+        d = json.loads(raw)
+        return cls(origin=d["o"], seq=int(d["s"]), entries=dict(d.get("e") or {}))
 
 
 def decode_event(raw: str | bytes):
@@ -175,4 +197,6 @@ def decode_event(raw: str | bytes):
         return DrainDigest.from_json(raw)
     if kind in (MEMBER_ADD, MEMBER_REMOVE):
         return MemberEvent.from_json(raw)
+    if kind == MEMBER_DIGEST:
+        return MembershipDigest.from_json(raw)
     return PrefixEvent.from_json(raw)

@@ -172,8 +172,8 @@ Reads stay local & fast; only **writes** fan out. Eventually consistent.
               ┌────────────────────── ClusterCoordinator ──────────────────────┐
   hot path ──▶│ publish_insert / publish_remove   (radix-tree mutations)        │
   bg loop  ──▶│ publish_load                       (per-backend in-flight)       │
-  admin    ──▶│ publish_drain / publish_drain_digest (LWW drain map)             │
-              │ sync(): poll bus → apply to { tree │ fleet view │ drain state }  │
+  admin    ──▶│ publish_drain / publish_member_* / *_digest (LWW + anti-entropy) │
+              │ sync(): poll bus → { tree │ fleet view │ drain │ membership }    │
               └───────────────────────────────┬─────────────────────────────────┘
                                                ▼  ReplicationBus (one interface)
         ┌───────────────┬──────────────────────┴───────────────────┐
@@ -190,11 +190,14 @@ Reads stay local & fast; only **writes** fan out. Eventually consistent.
   drain intent       (DrainState, LWW)     Redis: write-through snapshot + boot
                      (ts,origin) per node   warm_start;  gossip: periodic digest
                                             (anti-entropy) → late joiners converge
+  fleet membership   (MembershipState, LWW) runtime backend add/remove; periodic
+                     present/tombstone       digest → late joiners converge
 ```
 
 `events.py` defines the wire types (PrefixEvent / LoadEvent / DrainEvent /
-DrainDigest); `decode_event` dispatches them; `drain_state.py` is the LWW-Map
-CRDT (commutative, associative, idempotent merges).
+DrainDigest / MemberEvent / MembershipDigest); `decode_event` dispatches them;
+`drain_state.py` + `membership_state.py` are the LWW-Map CRDTs (commutative,
+associative, idempotent merges).
 
 ---
 

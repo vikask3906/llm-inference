@@ -147,7 +147,8 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
   runtime** (no restart), **drain** one for maintenance (stops new routing while
   in-flight work finishes, without killing it), restore it, and inspect live
   routing state (per-backend health / draining / in-flight / KV usage / circuit /
-  held prefix blocks). Enabled by
+  held prefix blocks). When clustered, add/remove/drain propagate fleet-wide and
+  **converge late-joining replicas** via LWW anti-entropy. Enabled by
   `GW_ADMIN_TOKEN` (off by default). When clustered, a drain **propagates
   fleet-wide** over the replication bus, so one API call drains the backend on
   every replica — and it **survives restarts / late joins**: on the Redis path a
@@ -189,7 +190,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 289 tests
+python -m pytest -q            # 291 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo

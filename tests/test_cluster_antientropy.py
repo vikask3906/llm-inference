@@ -12,6 +12,7 @@ from gateway.cluster import (
     DrainState,
     InMemoryBroker,
     InMemoryBus,
+    MembershipState,
 )
 from gateway.config import Config
 from gateway.radix_tree import RadixTree
@@ -101,3 +102,38 @@ def test_digest_reconciles_undrain_too():
     coordA.publish_drain_digest()
     coordB.sync()
     assert "b0" in regB.ids_for(MODEL)               # digest carried the undrain
+
+
+# --- membership LWW + anti-entropy ------------------------------------------
+
+def test_membership_lww_remove_then_readd():
+    m = MembershipState()
+    m.apply("b9", True, "http://b9:9000", "", ts=5, origin="A")
+    assert m.present().get("b9") == ("http://b9:9000", "")
+    m.apply("b9", False, "", "", ts=3, origin="B")     # stale remove ignored
+    assert "b9" in m.present()
+    m.apply("b9", False, "", "", ts=9, origin="B")     # newer remove wins (tombstone)
+    assert "b9" not in m.present() and "b9" in m.removed()
+
+
+def test_late_joiner_learns_runtime_membership_via_digest():
+    broker = InMemoryBroker()
+    regA = _registry("b0=http://b0:9000,b1=http://b1:9000")
+    coordA = _coord(broker, "A", regA)
+    # A adds b9 and removes b1 at runtime, BEFORE C exists.
+    regA.add("b9", "http://b9:9000"); coordA.publish_member_add("b9", "http://b9:9000")
+    regA.remove("b1"); coordA.publish_member_remove("b1")
+
+    # C joins later with the original startup config -> missed both live deltas.
+    regC = _registry("b0=http://b0:9000,b1=http://b1:9000")
+    coordC = _coord(broker, "C", regC)
+    coordC.sync()
+    assert regC.get("b9") is None and regC.get("b1") is not None   # stale
+
+    # A's membership digest converges C: b9 appears, b1 (tombstoned) is removed.
+    coordA.publish_membership_digest()
+    coordC.sync()
+    assert regC.get("b9") is not None and regC.get("b9").url == "http://b9:9000"
+    assert regC.get("b1") is None
+    # b0 (never touched at runtime, not in the map) is left alone.
+    assert regC.get("b0") is not None
