@@ -60,6 +60,24 @@ def test_origin_does_not_reapply_its_own_drain():
     assert coordA.sync() == 0
 
 
+def test_member_add_remove_propagates():
+    broker = InMemoryBroker()
+    regA, regB = _registry(), _registry()
+    coordA = _coord(broker, "A", regA)
+    coordB = _coord(broker, "B", regB)
+
+    # A adds a backend at runtime -> B learns of it via the bus.
+    coordA.publish_member_add("b9", "http://b9:9000", "")
+    coordB.sync()
+    assert regB.get("b9") is not None
+    assert regB.get("b9").url == "http://b9:9000"
+
+    # A removes it -> B drops it too.
+    coordA.publish_member_remove("b9")
+    coordB.sync()
+    assert regB.get("b9") is None
+
+
 def test_drain_without_registry_is_noop_safe():
     # A coordinator with no registry (e.g. cluster used only for prefix state)
     # must tolerate drain events without crashing.

@@ -30,6 +30,7 @@ class Backend:
 class BackendRegistry:
     def __init__(self, cfg: Config) -> None:
         self._by_id: dict[str, Backend] = {}
+        self._default_model = cfg.default_model
         for pair in cfg.backends.split(","):
             pair = pair.strip()
             if not pair:
@@ -39,6 +40,22 @@ class BackendRegistry:
 
     def all(self) -> list[Backend]:
         return list(self._by_id.values())
+
+    def add(self, backend_id: str, url: str, model: str | None = None) -> bool:
+        """Add (or update the URL of) a backend at runtime. Returns True if it was
+        newly created. A new backend starts unhealthy until the next health scrape."""
+        new = backend_id not in self._by_id
+        if new:
+            b = Backend(backend_id, url, model or self._default_model)
+            b.healthy = False                      # let the scrape confirm it's up
+            self._by_id[backend_id] = b
+        else:
+            self._by_id[backend_id].url = url      # URL update is idempotent
+        return new
+
+    def remove(self, backend_id: str) -> bool:
+        """Remove a backend from the fleet. Returns False if it didn't exist."""
+        return self._by_id.pop(backend_id, None) is not None
 
     def url(self, backend_id: str) -> str:
         return self._by_id[backend_id].url

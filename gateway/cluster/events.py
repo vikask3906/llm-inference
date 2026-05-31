@@ -24,6 +24,8 @@ DRAIN = "drain"            # operator drained a backend on one replica -> tell p
 UNDRAIN = "undrain"
 DRAIN_OP = "drainop"       # versioned (LWW) drain/undrain delta
 DRAIN_DIGEST = "draindigest"   # full LWW drain map for anti-entropy
+MEMBER_ADD = "member_add"      # runtime fleet membership: add a backend
+MEMBER_REMOVE = "member_remove"  # ... or remove one
 
 
 @dataclass
@@ -135,6 +137,33 @@ class DrainDigest:
         return cls(origin=d["o"], seq=int(d["s"]), entries=dict(d.get("e") or {}))
 
 
+@dataclass
+class MemberEvent:
+    """Runtime fleet-membership change: add or remove a backend."""
+
+    origin: str
+    seq: int
+    action: str            # MEMBER_ADD | MEMBER_REMOVE
+    backend_id: str
+    url: str = ""
+    model: str = ""
+
+    @property
+    def kind(self) -> str:
+        return self.action
+
+    def to_json(self) -> str:
+        return json.dumps({"k": self.action, "o": self.origin, "s": self.seq,
+                           "b": self.backend_id, "u": self.url, "m": self.model},
+                          separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str | bytes) -> "MemberEvent":
+        d = json.loads(raw)
+        return cls(origin=d["o"], seq=int(d["s"]), action=d["k"],
+                   backend_id=d["b"], url=d.get("u", ""), model=d.get("m", ""))
+
+
 def decode_event(raw: str | bytes):
     """Deserialize any event type off the wire, dispatching on the 'k' tag."""
     kind = json.loads(raw).get("k")
@@ -144,4 +173,6 @@ def decode_event(raw: str | bytes):
         return DrainEvent.from_json(raw)
     if kind == DRAIN_DIGEST:
         return DrainDigest.from_json(raw)
+    if kind in (MEMBER_ADD, MEMBER_REMOVE):
+        return MemberEvent.from_json(raw)
     return PrefixEvent.from_json(raw)

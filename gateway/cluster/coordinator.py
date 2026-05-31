@@ -20,10 +20,13 @@ eviction may diverge slightly; routing degrades gracefully, never breaks.
 from .drain_state import DrainState
 from .events import (
     INSERT,
+    MEMBER_ADD,
+    MEMBER_REMOVE,
     REMOVE_BACKEND,
     DrainDigest,
     DrainEvent,
     LoadEvent,
+    MemberEvent,
     PrefixEvent,
     decode_event,
 )
@@ -92,6 +95,17 @@ class ClusterCoordinator:
         self._reconcile_drains()
         self.published += 1
 
+    def publish_member_add(self, backend_id: str, url: str, model: str = "") -> None:
+        self._seq += 1
+        self._bus.publish(MemberEvent(self._replica_id, self._seq, MEMBER_ADD,
+                                      backend_id, url, model))
+        self.published += 1
+
+    def publish_member_remove(self, backend_id: str) -> None:
+        self._seq += 1
+        self._bus.publish(MemberEvent(self._replica_id, self._seq, MEMBER_REMOVE, backend_id))
+        self.published += 1
+
     def publish_drain_digest(self) -> None:
         """Broadcast this replica's full LWW drain map (anti-entropy). Lets a
         late-joining / restarted replica converge with no central store."""
@@ -136,6 +150,13 @@ class ClusterCoordinator:
             elif isinstance(e, DrainDigest):
                 if self._drain.merge(e.entries):
                     drains_changed = True
+            elif isinstance(e, MemberEvent):
+                if self._registry is not None:
+                    if e.action == MEMBER_ADD:
+                        self._registry.add(e.backend_id, e.url, e.model or None)
+                    else:
+                        self._registry.remove(e.backend_id)
+                        self._tree.remove_backend(e.backend_id)
             elif e.kind == INSERT:
                 self._tree.insert(e.hashes, e.backend_id)
             elif e.kind == REMOVE_BACKEND:

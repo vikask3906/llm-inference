@@ -153,8 +153,11 @@ latency.
     └─ sync(): apply peers' tree/load/drain mutations to local state
 
   Admin API (token-guarded, GW_ADMIN_TOKEN) ...................... server.py
-    POST /admin/backends/{id}/drain|undrain   maintenance, propagates fleet-wide
-    GET  /admin/backends , /admin/state        live routing inspection
+    POST   /admin/backends                     add a backend at runtime (no restart)
+    DELETE /admin/backends/{id}                remove a backend at runtime
+    POST   /admin/backends/{id}/drain|undrain  maintenance, propagates fleet-wide
+    GET    /admin/backends , /admin/state       live routing inspection
+    (add/remove/drain all propagate over the cluster bus when clustered)
   Cluster ingest (gossip transport) ............................. server.py
     POST /cluster/gossip                       receive a peer's event batch
 ```

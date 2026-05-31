@@ -42,8 +42,13 @@ def _wire2(admin_token=TOKEN):
     gw.tenants = TenantRegistry("")
     gw.limiter = RateLimiter()
     gw.authenticator = Authenticator(set(), False)
+    gw.cluster = None
+    # b2's transport is wired but it's NOT in the registry -> a runtime add can
+    # bring it into rotation and serve real traffic.
+    spare = create_app("b2", 600)
     gw.app.state.client = httpx.AsyncClient(transport=MultiHostTransport(
-        {"b0": httpx.ASGITransport(app=a), "b1": httpx.ASGITransport(app=b)}))
+        {"b0": httpx.ASGITransport(app=a), "b1": httpx.ASGITransport(app=b),
+         "b2": httpx.ASGITransport(app=spare)}))
 
 
 def _gwclient():
@@ -116,6 +121,74 @@ def test_drain_excludes_backend_then_undrain_restores():
                 assert u.status_code == 200 and u.json()["draining"] is False
                 picks2 = {await _chat_backend(c) for _ in range(12)}
                 assert "b0" in picks2
+        finally:
+            gw.cfg.admin_token = ""
+            await gw.app.state.client.aclose()
+    asyncio.run(run())
+
+
+def test_add_backend_at_runtime_then_serves_traffic():
+    async def run():
+        _wire2()
+        try:
+            async with _gwclient() as c:
+                # add b2 (wired in transport, absent from registry)
+                r = await c.post("/admin/backends", headers=_admin(),
+                                 json={"id": "b2", "url": "http://b2:9000"})
+                assert r.status_code == 200 and r.json()["created"] is True
+                assert "b2" in {b["id"] for b in
+                                (await c.get("/admin/backends", headers=_admin())).json()["backends"]}
+                # starts unhealthy; simulate the scrape confirming it, then funnel
+                # all traffic to it by draining the originals.
+                gw.registry.set_health("b2", True)
+                await c.post("/admin/backends/b0/drain", headers=_admin())
+                await c.post("/admin/backends/b1/drain", headers=_admin())
+                picks = {await _chat_backend(c) for _ in range(6)}
+                assert picks == {"b2"}                  # the runtime-added backend serves
+        finally:
+            gw.cfg.admin_token = ""
+            await gw.app.state.client.aclose()
+    asyncio.run(run())
+
+
+def test_remove_backend_at_runtime_excludes_from_routing():
+    async def run():
+        _wire2()
+        try:
+            async with _gwclient() as c:
+                r = await c.delete("/admin/backends/b0", headers=_admin())
+                assert r.status_code == 200 and r.json()["removed"] is True
+                s = (await c.get("/admin/state", headers=_admin())).json()
+                assert "b0" not in {b["id"] for b in s["backends"]}   # gone entirely
+                assert set(s["routable"]) == {"b1"}
+                picks = {await _chat_backend(c) for _ in range(6)}
+                assert picks == {"b1"}
+        finally:
+            gw.cfg.admin_token = ""
+            await gw.app.state.client.aclose()
+    asyncio.run(run())
+
+
+def test_add_requires_id_and_url():
+    async def run():
+        _wire2()
+        try:
+            async with _gwclient() as c:
+                r = await c.post("/admin/backends", headers=_admin(), json={"id": "x"})
+                assert r.status_code == 400
+        finally:
+            gw.cfg.admin_token = ""
+            await gw.app.state.client.aclose()
+    asyncio.run(run())
+
+
+def test_remove_unknown_backend_404():
+    async def run():
+        _wire2()
+        try:
+            async with _gwclient() as c:
+                r = await c.delete("/admin/backends/ghost", headers=_admin())
+                assert r.status_code == 404
         finally:
             gw.cfg.admin_token = ""
             await gw.app.state.client.aclose()

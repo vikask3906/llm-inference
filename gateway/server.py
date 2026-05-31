@@ -410,6 +410,47 @@ async def admin_list_backends(request: Request):
     return {"backends": [_backend_view(b) for b in registry.all()]}
 
 
+@app.post("/admin/backends")
+async def admin_add_backend(request: Request):
+    """Add a backend to the fleet at runtime (no restart). Body: {id, url, model?}.
+    Starts unhealthy until the next health scrape confirms it."""
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    body = await request.json()
+    bid, url = body.get("id"), body.get("url")
+    if not bid or not url:
+        return JSONResponse({"error": "id and url are required"}, status_code=400)
+    model = body.get("model")
+    new = registry.add(bid, url, model)
+    if cluster is not None:
+        cluster.publish_member_add(bid, url, model or "")    # propagate fleet-wide
+    metrics.inc_counter("gateway_admin_membership_total", help="Admin membership changes",
+                        backend=bid, action="add")
+    log_event(log, "admin", action="add", backend=bid, url=url, created=new)
+    return {"backend": bid, "url": url, "created": new}
+
+
+@app.delete("/admin/backends/{backend_id}")
+async def admin_remove_backend(backend_id: str, request: Request):
+    """Remove a backend from the fleet at runtime. In-flight requests already
+    dispatched there finish; no new requests route to it (it's gone from the pool)."""
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    if not registry.remove(backend_id):
+        return JSONResponse({"error": f"unknown backend {backend_id!r}"}, status_code=404)
+    tree.remove_backend(backend_id)                          # drop its prefix holdings
+    load.inflight.pop(backend_id, None)
+    load.kv_usage.pop(backend_id, None)
+    if cluster is not None:
+        cluster.publish_member_remove(backend_id)            # propagate fleet-wide
+    metrics.inc_counter("gateway_admin_membership_total", help="Admin membership changes",
+                        backend=backend_id, action="remove")
+    log_event(log, "admin", action="remove", backend=backend_id)
+    return {"backend": backend_id, "removed": True}
+
+
 @app.post("/admin/backends/{backend_id}/drain")
 async def admin_drain(backend_id: str, request: Request):
     guard = _admin_guard(request)
