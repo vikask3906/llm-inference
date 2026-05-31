@@ -392,7 +392,7 @@ of the abuser — the core fairness property.
 
 **Next**
 - Weighted fair queuing across tenants (priority tiers beyond token buckets).
-- Rust parity for the newer routing modes (admission is the natural first port).
+- Rust parity for the remaining routing modes (admission ported ✓; RAG/disagg next).
 - vs-NGINX round-robin comparison panel in Grafana.
 - COW/epoch reclamation in the tree (path compression is implemented ✓).
 - Token-accurate hashing on by default once the tokenizer cost is amortized.

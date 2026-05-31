@@ -284,9 +284,10 @@ for a complete file-by-file account of everything implemented.
   gossip with **LWW anti-entropy** — and durable drain (snapshot warm-start on
   Redis, digest convergence on gossip). Next: token-accurate per-route SLO
   tracking and a multi-replica architecture-diagram refresh in the design doc.
-- **Rust** hot-path rewrite ([`rust/`](rust/)): data-plane core + axum/reqwest
-  streaming proxy done ✓ (20 core tests; e2e smoke-tested vs the mock backend);
-  next port metrics/circuit/tenancy + the profiled before/after latency vs Python.
+- **Rust** hot-path rewrite ([`rust/`](rust/)): full-parity data plane —
+  routing + radix tree + metrics + circuit + failover + tenancy + structured
+  logging + **SLO-aware admission** — done ✓ (53 tests; ~52× throughput / ~33×
+  lower p99 vs Python, see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
 - Backend Prometheus scraping, token-accurate tokenization, weighted fair
   queuing, and a multi-replica gateway with shared prefix state.
 
