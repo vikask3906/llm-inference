@@ -23,13 +23,15 @@ from .fleet import FleetLoadView
 
 class ClusterCoordinator:
     def __init__(self, tree, bus, replica_id: str,
-                 fleet: FleetLoadView | None = None, registry=None) -> None:
+                 fleet: FleetLoadView | None = None, registry=None, store=None) -> None:
         self._tree = tree
         self._bus = bus
         self._replica_id = replica_id
         # Optional backend registry: drain/undrain events from peers are applied
         # here so a maintenance decision on one replica reaches the whole fleet.
         self._registry = registry
+        # Optional durable snapshot of drain state (survives restart / late join).
+        self._store = store
         # peers' load snapshots land here; the router reads it for fleet-wide load.
         self.fleet = fleet if fleet is not None else FleetLoadView()
         self._seq = 0
@@ -68,11 +70,25 @@ class ClusterCoordinator:
 
     def publish_drain(self, backend_id: str, draining: bool) -> None:
         """Tell peers to drain (or restore) a backend, so a maintenance decision
-        on this replica takes effect fleet-wide."""
+        on this replica takes effect fleet-wide. Also write-through to the durable
+        snapshot so restarting / late-joining replicas don't miss it."""
         self._seq += 1
         self._bus.publish(PrefixEvent(DRAIN if draining else UNDRAIN,
                                       backend_id, self._replica_id, self._seq))
+        if self._store is not None:
+            self._store.record_drain(backend_id, draining)
         self.published += 1
+
+    def warm_start(self) -> set[str]:
+        """Seed this replica's drain state from the durable snapshot on boot, so a
+        restart or a late join doesn't route to a backend under maintenance.
+        Returns the set of backends drained."""
+        if self._store is None or self._registry is None:
+            return set()
+        drained = self._store.drained()
+        for bid in drained:
+            self._registry.set_draining(bid, True)
+        return drained
 
     # ------------------------------------------------------------ sync path
     def sync(self) -> int:
@@ -94,3 +110,5 @@ class ClusterCoordinator:
 
     def close(self) -> None:
         self._bus.close()
+        if self._store is not None:
+            self._store.close()

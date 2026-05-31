@@ -23,6 +23,7 @@ from .events import (
     decode_event,
 )
 from .fleet import FleetLoadView
+from .snapshot import InMemorySnapshotStore, RedisSnapshotStore, SnapshotStore, make_store
 
 __all__ = [
     "ClusterConfig",
@@ -33,6 +34,10 @@ __all__ = [
     "InMemoryBroker",
     "RedisBus",
     "make_bus",
+    "SnapshotStore",
+    "InMemorySnapshotStore",
+    "RedisSnapshotStore",
+    "make_store",
     "PrefixEvent",
     "LoadEvent",
     "decode_event",

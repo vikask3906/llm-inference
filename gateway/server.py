@@ -36,7 +36,7 @@ from .load_tracker import LoadTracker
 from .logging_setup import configure_logging, log_event
 from .metrics import BLOCK_BUCKETS, MetricsCollector
 from .auth import Authenticator, parse_api_keys
-from .cluster import ClusterConfig, ClusterCoordinator, make_bus
+from .cluster import ClusterConfig, ClusterCoordinator, make_bus, make_store
 from .radix_tree import RadixTree
 from .hashing import block_hashes as _block_hashes
 from .router import RouteResult, Router
@@ -156,8 +156,9 @@ cluster = None
 if cluster_cfg.enabled:
     try:
         cluster = ClusterCoordinator(tree, make_bus(cluster_cfg), cluster_cfg.replica_id,
-                                     registry=registry)
+                                     registry=registry, store=make_store(cluster_cfg))
         router.fleet = cluster.fleet   # router scores by fleet-wide (local+peer) load
+        cluster.warm_start()           # seed drain state from the durable snapshot
     except Exception:
         cluster = None            # a bus init failure must not break the gateway
 
