@@ -37,3 +37,6 @@ docs/demoo.txt.pub
 
 # Personal interview-prep study guide — local reference only, do NOT publish
 docs/LEARNING_PATH.md
+
+# Personal deep-dive learning docs — local reference only, never publish
+docs/learn/
