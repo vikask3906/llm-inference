@@ -43,6 +43,7 @@ bench-all:  ## run every benchmark (matrix + dag + rag + admission + disagg + mu
 	python bench/multimodal_bench.py
 	python bench/cluster_bench.py
 	python bench/fairqueue_bench.py
+	python bench/agentic_bench.py
 
 bench-dag:  ## DAG-scheduler benchmark: locality vs round-robin
 	python bench/dag_bench.py
@@ -64,3 +65,6 @@ bench-cluster:  ## Cluster-scaling benchmark: shared vs unshared prefix state
 
 bench-fairqueue:  ## Weighted-fair-queuing benchmark: WFQ vs FIFO under a greedy tenant
 	python bench/fairqueue_bench.py
+
+bench-agentic:  ## Agentic benchmark: session-affinity vs round-robin on multi-turn loops
+	python bench/agentic_bench.py

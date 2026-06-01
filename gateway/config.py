@@ -36,6 +36,16 @@ class Config:
     # round_robin | consistent_hash | prefix_tree | speculative
     strategy: str = "prefix_tree"
 
+    # --- Session affinity (agentic / multi-turn workflows) ---
+    # When True, a request carrying `X-Session-ID` (or body.session_id) is routed
+    # to the backend that served the previous turn of the same session, so an
+    # agent loop's growing context stays warm across N turns instead of being
+    # re-prefilled on a different backend. Falls back to the normal cost-function
+    # pick when the pin is missing or the pinned backend is ineligible. Default OFF.
+    session_affinity_enabled: bool = False
+    session_affinity_capacity: int = 10_000          # LRU bound on the pin table
+    session_affinity_ttl_s: float = 1800.0           # drop pin after this much idle
+
     # --- Extensions: BPE token-ID prefix hashing ---
     # When True, hash blocks of real BPE token IDs instead of raw character
     # blocks. Matches how vLLM keys its KV cache, so prefixes that tokenize

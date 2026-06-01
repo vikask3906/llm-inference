@@ -38,6 +38,7 @@ from .metrics import BLOCK_BUCKETS, MetricsCollector
 from .auth import Authenticator, parse_api_keys
 from .cluster import ClusterConfig, ClusterCoordinator, make_bus, make_store
 from .radix_tree import RadixTree
+from .session_affinity import SessionAffinity, extract_session_id
 from .hashing import block_hashes as _block_hashes
 from .router import RouteResult, Router
 from .tenancy import RateLimiter, TenantRegistry, tenant_seed
@@ -88,6 +89,10 @@ limiter = RateLimiter()
 # require=False by default, so check() is a no-op and the gateway stays open.
 authenticator = Authenticator(tenants.keys() | parse_api_keys(cfg.api_keys),
                               cfg.require_auth, parse_api_keys(cfg.api_key_hashes))
+# Session affinity table (agentic / multi-turn): consulted before the strategy,
+# remembers the chosen backend per session_id. No-op when disabled in config.
+session_affinity = SessionAffinity(cfg.session_affinity_capacity,
+                                   cfg.session_affinity_ttl_s)
 log = configure_logging(cfg.log_level)
 
 # LoRA-aware routing: attach declared adapters to the backend objects so the
@@ -443,6 +448,7 @@ async def admin_remove_backend(backend_id: str, request: Request):
         return JSONResponse({"error": f"unknown backend {backend_id!r}"}, status_code=404)
     tree.remove_backend(backend_id)                          # drop its prefix holdings
     load.inflight.pop(backend_id, None)
+    session_affinity.forget_backend(backend_id)
     load.kv_usage.pop(backend_id, None)
     if cluster is not None:
         cluster.publish_member_remove(backend_id)            # propagate fleet-wide
@@ -544,6 +550,11 @@ async def chat_completions(request: Request):
     model = body.get("model")
     prompt = extract_prompt(body.get("messages", []))
     strategy = request.headers.get("x-routing-strategy")
+    # Session affinity (opt-in, agentic workflows): pin every turn of a session
+    # to the backend that served the previous turn. Falls through to normal
+    # routing when no session id or the pinned backend is ineligible.
+    session_id = (extract_session_id(request.headers, body)
+                  if cfg.session_affinity_enabled else None)
 
     eff_strategy = strategy or cfg.strategy
 
@@ -678,6 +689,18 @@ async def chat_completions(request: Request):
     # Exclude backends with an open circuit. If every circuit is open, degrade to
     # trying all of them (better to attempt than to hard-fail).
     remaining = [b for b in ids if breaker.allow(b)] or list(ids)
+
+    # Session affinity (opt-in, agentic / multi-turn): if this session has a
+    # previous-turn backend AND it's still eligible, pin to it -- the strongest
+    # KV-reuse signal for an agent loop's growing context. Falls through when
+    # the pin is missing or ineligible; the new pick is re-pinned after dispatch
+    # in body_iter's finally. RAG/disagg/multimodal routing below can still
+    # override (they're explicit opt-ins for that request shape).
+    session_pinned = None
+    if session_id is not None:
+        session_pinned = session_affinity.pick(session_id, remaining)
+        if session_pinned is not None:
+            remaining = [session_pinned]
 
     # RAG chunk-affinity selection (opt-in): among healthy candidates, pin to the
     # backend already holding the most of this request's chunks -- the set-based
@@ -936,6 +959,9 @@ async def chat_completions(request: Request):
                 modal_req_final = parse_multimodal_request(body, mm_cfg)
                 if modal_req_final is not None:
                     mm_index.record(final_r.backend_id, modal_req_final.media_ids())
+            # Pin this session's next turn to the same backend (agentic KV reuse).
+            if session_id is not None and upstream.status_code == 200:
+                session_affinity.remember(session_id, final_r.backend_id)
             # reconcile TPS: actual streamed tokens vs the reserved estimate
             actual_output = max(0, out_events - 1)     # minus the [DONE] event
             release(actual_output)

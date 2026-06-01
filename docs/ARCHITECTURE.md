@@ -281,6 +281,7 @@ A faithful port of the per-request hot path — same behavior, ~52× throughput 
 | Disaggregated prefill/decode | `disagg/` | `GW_DISAGG_POOLS` | `test_disagg`, `disagg_bench` |
 | Multimodal capability + media affinity | `multimodal/` | `GW_MULTIMODAL_ENABLED` | `test_multimodal`, `multimodal_bench` |
 | DAG cache-locality scheduler | `dag/` | `GW_DAG_ENABLED` | `test_dag`, `dag_bench` |
+| Agentic / multi-turn (session affinity) | `session_affinity` | `GW_SESSION_AFFINITY_ENABLED` | `test_session_affinity`, `test_server_session_affinity`, `agentic_bench` |
 | SLO autoscaler | `autoscale/` | `GW_AUTOSCALE_ENABLED` | `test_autoscale` |
 | Semantic cache / LoRA / TTFT predictor | `extensions/` | per-flag | `test_semantic_cache`, `test_lora`, `test_ttft_predictor` |
 | **Horizontal scaling** (shared prefix+load+circuit+drain) | `cluster/` | `GW_CLUSTER_ENABLED` | `test_cluster*` (32+ tests) |

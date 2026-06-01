@@ -91,6 +91,7 @@ Each extension ships with its own before/after benchmark, written up in
 | **Multimodal** | `bench/multimodal_bench.py` | Media-affinity hits **90% image-cache** vs round-robin's 81%, while staying **11× more load-balanced** than consistent-hash (CoV 0.01 vs 0.11) — best of both — [`MULTIMODAL_RESULTS.md`](docs/benchmarks/MULTIMODAL_RESULTS.md) |
 | **Cluster scaling** | `bench/cluster_bench.py` | Shared prefix state holds **~95% hit rate at any replica count**; unshared collapses **95%→55%** by 16 replicas (each replica learns only ~1/N of the prefix map) — [`CLUSTER_RESULTS.md`](docs/benchmarks/CLUSTER_RESULTS.md) |
 | **Weighted fair queue** | `bench/fairqueue_bench.py` | Under a bronze flood, FIFO drags gold to **51%** completion; WFQ keeps gold + silver at **100%** and makes greedy bronze absorb the shortfall — [`FAIRQUEUE_RESULTS.md`](docs/benchmarks/FAIRQUEUE_RESULTS.md) |
+| **Agentic (multi-turn)** | `bench/agentic_bench.py` | Session-affinity holds **87%** cross-turn cache hit at 14 turns vs round-robin's **64%** (compounds with turn count) — the "KV cache across turns" problem — [`AGENTIC_RESULTS.md`](docs/benchmarks/AGENTIC_RESULTS.md) |
 
 ## How it works
 
@@ -174,6 +175,12 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 - **DAG scheduling** — `POST /v1/dag/schedule` plans cache-locality-aware
   placement of multi-step workflows (map-reduce, tool-use chains). Opt-in via
   `GW_DAG_ENABLED`.
+- **Agentic / multi-turn (session affinity)** — a request carrying
+  `X-Session-ID` (or body `session_id`) is **pinned to the backend that served
+  the previous turn**, so an agent loop's growing context stays warm across N
+  turns instead of re-prefilling on a different node. Falls back to normal
+  routing when the pinned backend is ineligible. Opt-in via
+  `GW_SESSION_AFFINITY_ENABLED`.
 - **Autoscaling** — SLO-driven replica planner (Erlang-C + utilization target,
   anti-flapping cooldowns). Emits scaling recommendations via `/autoscale` and
   Prometheus metrics. Opt-in via `GW_AUTOSCALE_ENABLED`.
@@ -194,7 +201,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 296 tests
+python -m pytest -q            # 307 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
