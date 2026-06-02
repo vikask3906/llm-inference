@@ -39,6 +39,7 @@ from .auth import Authenticator, parse_api_keys
 from .cluster import ClusterConfig, ClusterCoordinator, make_bus, make_store
 from .radix_tree import RadixTree
 from .session_affinity import SessionAffinity, extract_session_id
+from .fairsched import AsyncFairScheduler, parse_weights
 from .hashing import block_hashes as _block_hashes
 from .router import RouteResult, Router
 from .tenancy import RateLimiter, TenantRegistry, tenant_seed
@@ -93,6 +94,14 @@ authenticator = Authenticator(tenants.keys() | parse_api_keys(cfg.api_keys),
 # remembers the chosen backend per session_id. No-op when disabled in config.
 session_affinity = SessionAffinity(cfg.session_affinity_capacity,
                                    cfg.session_affinity_ttl_s)
+# Weighted fair queuing (opt-in): a bounded pool of concurrent dispatch slots
+# released in weighted-fair (SFQ) order by tenant tier, so a greedy low tier
+# can't starve a premium tier under contention. No-op below the limit.
+scheduler = AsyncFairScheduler(
+    cfg.wfq_max_concurrency,
+    weights=parse_weights(cfg.wfq_weights),
+    default_weight=cfg.wfq_default_weight,
+    cost=cfg.wfq_cost) if cfg.wfq_enabled else None
 log = configure_logging(cfg.log_level)
 
 # LoRA-aware routing: attach declared adapters to the backend objects so the
@@ -334,6 +343,11 @@ async def metrics_endpoint():
     for tid, n in list(limiter.inflight.items()):
         metrics.set_gauge("gateway_tenant_inflight", n,
                           help="In-flight requests per tenant", tenant=tid)
+    if scheduler is not None:
+        metrics.set_gauge("gateway_wfq_active", scheduler.active,
+                          help="Requests holding a WFQ dispatch slot")
+        metrics.set_gauge("gateway_wfq_queue_depth", scheduler.queue_depth,
+                          help="Requests waiting in the WFQ for a dispatch slot")
     return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
 
@@ -806,6 +820,23 @@ async def chat_completions(request: Request):
                                "type": "unsupported_media_type"}},
                     status_code=415, headers={"x-request-id": request_id})
 
+    # Weighted fair queuing (opt-in): admitted requests now compete for a bounded
+    # number of concurrent dispatch slots. Below the limit this returns instantly
+    # (immediate dispatch); once saturated, requests are released in weighted-fair
+    # order by tenant tier, so a flooding low tier can't starve premium SLOs. Placed
+    # after every early return (auth / rate-limit / admission / 415) so a slot is
+    # only taken when the request will actually dispatch; released on the 502 path
+    # and in body_iter's finally.
+    sched_acquired = False
+    if scheduler is not None:
+        t_wait = time.perf_counter()
+        await scheduler.acquire(tenant.tier)
+        sched_acquired = True
+        metrics.observe("gateway_wfq_wait_seconds", time.perf_counter() - t_wait,
+                        buckets=SLO_BUCKETS,
+                        help="Time queued in WFQ before dispatch (s) per tier",
+                        tier=tenant.tier)
+
     client: httpx.AsyncClient = request.app.state.client
     r = cm = upstream = None
     routing_recorded = False
@@ -870,6 +901,8 @@ async def chat_completions(request: Request):
 
     if upstream is None:
         release(0)
+        if sched_acquired:
+            scheduler.release()        # free the WFQ slot; never streamed
         metrics.inc_counter("gateway_errors_total", help="Gateway-side errors", code="502")
         span.set_attribute("http.status_code", 502)
         span.set_attribute("routing.retries", retries)
@@ -936,6 +969,8 @@ async def chat_completions(request: Request):
         finally:
             await final_cm.__aexit__(None, None, None)
             load.on_complete(final_r.backend_id, final_r.tokens)
+            if sched_acquired:
+                scheduler.release()        # free the WFQ slot -> wake next waiter
             # Record (features, observed TTFT) for offline predictor training.
             if obs_logger is not None and first_byte_ms is not None:
                 obs_logger.log(Observation(

@@ -122,78 +122,80 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 
 ## Features
 
-- **Routing** — path-compressed radix tree, est-TTFT cost function, load-spread
-  tiebreak, emergent hot-prefix replication; pluggable strategies (`round_robin`,
-  `consistent_hash`, `prefix_tree`).
+Built as a **focused core + production pillars**, with a set of opt-in routing
+modes layered on the same substrate. The breadth is real and tested; the pitch
+leads with the parts that carry the thesis.
+
+### Core — prefix-aware routing (the thesis)
+
+- **Routing** — path-compressed radix tree, est-TTFT cost function (cache
+  affinity vs load in a single millisecond unit), load-spread tiebreak, emergent
+  hot-prefix replication; pluggable strategies (`round_robin`, `consistent_hash`,
+  `prefix_tree`). Validated on real vLLM + 2× A40 (**−53% mean TTFT, +10 pp**
+  cache hit rate; see [Results](#results)).
+
+### Production pillars
+
 - **Fault tolerance** — per-backend circuit breaker (closed/open/half-open with
   auto-recovery) and safe pre-first-byte failover (mid-stream errors propagate, no
   duplicated tokens).
-- **Authentication** — opt-in API-key auth (`GW_REQUIRE_AUTH`): a request must
-  carry `Authorization: Bearer <key>` with a key in the valid set or it's
-  rejected `401`. Keys can be **pre-hashed** (`GW_API_KEY_HASHES`, sha256) so
-  plaintext never lives in the gateway's config; constant-time comparison.
-  Reuses the tenant-key scheme, so an authenticated key still resolves to its tier.
-- **Multi-tenant fairness** — per-tenant RPS + TPS token buckets (OpenAI RPM+TPM
-  style) + in-flight caps, `429` with `Retry-After`, and per-tenant prefix
-  isolation (routing seed + backend `cache_salt`) to close the cross-tenant TTFT
-  side channel. Optional **token-accurate accounting** (`GW_TOKEN_ACCURATE_ACCOUNTING`)
-  counts real tokenizer tokens for quota/admission instead of the `chars/4`
-  heuristic (which is off by 2-3× on code / non-English). A **weighted fair
-  queue** ([`gateway/fairqueue.py`](gateway/fairqueue.py), start-time fair
-  queuing) shares scarce dispatch slots by tier weight so a greedy tenant can't
-  starve premium SLOs.
+- **Multi-tenancy & fairness** — opt-in API-key auth (`GW_REQUIRE_AUTH`,
+  constant-time compare, **pre-hashed keys** via `GW_API_KEY_HASHES` so plaintext
+  never lives in config); per-tenant RPS + TPS token buckets (OpenAI RPM+TPM
+  style) + in-flight caps, `429` + `Retry-After`; per-tenant prefix isolation
+  (routing seed + backend `cache_salt`) closing the cross-tenant TTFT side
+  channel; a **live weighted fair queue** (`GW_WFQ_ENABLED`, start-time fair
+  queuing — [`gateway/fairsched.py`](gateway/fairsched.py)) that gates dispatch
+  under contention so a greedy tier can't starve premium SLOs; and optional
+  **token-accurate accounting** (`GW_TOKEN_ACCURATE_ACCOUNTING`).
 - **Observability** — structured JSON logs (request_id + trace_id), Prometheus
-  `/metrics`, OpenTelemetry traces, and a provisioned Grafana dashboard.
-  **Per-route SLO**: per-model TTFT + total-latency histograms
-  (`gateway_ttft_seconds` / `gateway_request_duration_seconds`, labeled by
-  model → p50/p95/p99 per route) and an optional TTFT-budget violation counter
-  (`GW_SLO_TTFT_MS`).
-- **Control plane** — token-guarded `/admin/*` API to **add / remove backends at
-  runtime** (no restart), **drain** one for maintenance (stops new routing while
-  in-flight work finishes, without killing it), restore it, and inspect live
-  routing state (per-backend health / draining / in-flight / KV usage / circuit /
-  held prefix blocks). When clustered, add/remove/drain propagate fleet-wide and
-  **converge late-joining replicas** via LWW anti-entropy. Enabled by
-  `GW_ADMIN_TOKEN` (off by default). When clustered, a drain **propagates
-  fleet-wide** over the replication bus, so one API call drains the backend on
-  every replica — and it **survives restarts / late joins**: on the Redis path a
-  write-through snapshot warm-starts the drain on boot; on the broker-less gossip
-  path a periodic **anti-entropy digest** (an LWW drain map that resolves
-  concurrent drain/undrain) converges any replica with no central store.
-- **RAG-aware routing** — structured RAG payloads are canonicalized (deduped,
-  sorted chunks → identical prefix), routed by chunk-affinity (set-overlap) to
-  the backend already holding the most chunks. Opt-in via `GW_RAG_ENABLED`.
-- **SLO-aware admission** — TTFT-budget fail-fast, fleet-pressure priority
-  shedding (gold protected, bronze shed first), Retry-After headers. Opt-in via
-  `GW_ADMISSION_ENABLED`.
-- **Disaggregated prefill/decode** — Splitwise/DistServe-style phase splitting:
-  assign prefill and decode to specialized backends when the split beats
-  co-location. Opt-in via `GW_DISAGG_POOLS`.
-- **Multi-modal routing** — capability filtering (only vision backends serve
-  images) + media-affinity cache (prefer the backend that already encoded an
-  image). Opt-in via `GW_MULTIMODAL_ENABLED`.
-- **DAG scheduling** — `POST /v1/dag/schedule` plans cache-locality-aware
-  placement of multi-step workflows (map-reduce, tool-use chains). Opt-in via
-  `GW_DAG_ENABLED`.
-- **Agentic / multi-turn (session affinity)** — a request carrying
-  `X-Session-ID` (or body `session_id`) is **pinned to the backend that served
-  the previous turn**, so an agent loop's growing context stays warm across N
-  turns instead of re-prefilling on a different node. Falls back to normal
-  routing when the pinned backend is ineligible. Opt-in via
-  `GW_SESSION_AFFINITY_ENABLED`.
-- **Autoscaling** — SLO-driven replica planner (Erlang-C + utilization target,
-  anti-flapping cooldowns). Emits scaling recommendations via `/autoscale` and
-  Prometheus metrics. Opt-in via `GW_AUTOSCALE_ENABLED`.
-- **Horizontal scaling** — run multiple gateway replicas behind a load balancer
-  with **shared state**: each keeps its local radix tree for fast longest-prefix
-  match and replicates over a **pluggable bus** (Redis pub/sub *or* broker-less
-  peer-to-peer HTTP gossip) both (a) tree *mutations* — so
-  a request can hit any replica and still route to the backend holding the cached
-  prefix — and (b) per-backend *load + circuit state* — so the cost function
-  scores by fleet-wide in-flight and two replicas don't stampede the same
-  "least-loaded" node. Reads stay local; only writes fan out. Opt-in via
-  `GW_CLUSTER_ENABLED` (the gossip `/cluster/gossip` endpoint is authenticated by
-  a shared `GW_CLUSTER_SECRET`) — see [Horizontal scaling](#horizontal-scaling-multi-replica).
+  `/metrics`, OpenTelemetry traces, provisioned Grafana dashboard. **Per-route
+  SLO**: per-model TTFT + total-latency histograms (`gateway_ttft_seconds` /
+  `gateway_request_duration_seconds` → p50/p95/p99 per route) and an optional
+  TTFT-budget violation counter (`GW_SLO_TTFT_MS`).
+- **Horizontal scaling** — multiple gateway replicas behind a load balancer with
+  **shared state**: each keeps its local radix tree for fast longest-prefix match
+  and replicates over a **pluggable bus** (Redis pub/sub *or* broker-less
+  peer-to-peer HTTP gossip) both (a) tree *mutations* (any replica routes to the
+  warm backend) and (b) per-backend *load + circuit state* (the cost function
+  scores by fleet-wide in-flight, so replicas don't stampede one node). Reads stay
+  local, writes fan out; eventually consistent by design. Drain + membership
+  changes propagate fleet-wide and **converge late joiners** via LWW-CRDT
+  anti-entropy. Opt-in via `GW_CLUSTER_ENABLED` (gossip `/cluster/gossip`
+  authenticated by `GW_CLUSTER_SECRET`) — see
+  [Horizontal scaling](#horizontal-scaling-multi-replica).
+- **Control plane** — token-guarded `/admin/*` API (`GW_ADMIN_TOKEN`, off by
+  default) to **add / remove backends at runtime** (no restart), **drain** one for
+  maintenance (new routing stops, in-flight work finishes, no kill), restore it,
+  and inspect live routing state. When clustered, add/remove/drain propagate
+  fleet-wide and survive restarts / late joins (Redis snapshot warm-start; gossip
+  anti-entropy digest).
+- **Rust hot-path** — a full-parity data-plane rewrite (Tokio/axum): routing +
+  radix tree + circuit + failover + tenancy + metrics + logging + admission, at
+  **~52× throughput / ~33× lower p99** vs Python on the same backend (53 tests;
+  see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
+
+### Agentic / multi-turn highlight
+
+- **Session affinity** (`GW_SESSION_AFFINITY_ENABLED`) — a request carrying
+  `X-Session-ID` (or body `session_id`) is **pinned to the backend that served the
+  previous turn**, so an agent loop's growing context stays warm across N turns
+  instead of re-prefilling elsewhere. **87% vs 64% cross-turn cache hit at 14
+  turns — and it compounds with turn count.** Falls back to normal routing when
+  the pin is ineligible.
+
+### Also implemented — opt-in routing modes (same substrate)
+
+Each pre-filters the candidate set, then the core est-TTFT scorer + all guards run:
+
+- **RAG chunk-affinity** (`GW_RAG_ENABLED`) — canonicalize chunk *sets* → route by set-overlap to the backend holding the most chunks.
+- **SLO-aware admission** (`GW_ADMISSION_ENABLED`) — TTFT-budget fail-fast + fleet-pressure priority shedding (gold protected, bronze shed first), Retry-After.
+- **Disaggregated prefill/decode** (`GW_DISAGG_POOLS`) — Splitwise/DistServe-style split *decision* when it beats co-location (routing decision only; no real KV transfer yet).
+- **Multi-modal** (`GW_MULTIMODAL_ENABLED`) — capability filter (only vision backends serve images) + media-affinity cache.
+- **DAG scheduling** (`POST /v1/dag/schedule`) — cache-locality-aware placement of multi-step workflows (map-reduce, tool chains).
+- **Autoscaling** (`GW_AUTOSCALE_ENABLED`) — Erlang-C + utilization SLO-driven replica planner with anti-flap cooldowns (advisory recommendations via `/autoscale`).
+- **Speculative / LoRA / semantic cache / predictive TTFT** — tail hedging (top-K race), adapter-aware routing, paraphrase cache, and a learned-TTFT blend hook.
+
 - **OpenAI-compatible** — `POST /v1/chat/completions` with SSE streaming.
 
 ## Quickstart
@@ -201,7 +203,7 @@ Two layers of routing intelligence, scored by **estimated time-to-first-token**:
 ```bash
 pip install -r requirements-dev.txt
 
-python -m pytest -q            # 307 tests
+python -m pytest -q            # 314 tests
 python bench/sim.py            # routing hit-rate proof (no network)
 python bench/e2e_inproc.py     # full HTTP path through 3 mock backends
 python bench/fairness_sim.py   # per-tenant fairness demo
@@ -308,7 +310,13 @@ is the file-by-file account.
   routing + radix tree + metrics + circuit + failover + tenancy + structured
   logging + **SLO-aware admission** — done ✓ (53 tests; ~52× throughput / ~33×
   lower p99 vs Python, see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
-- Backend Prometheus scraping, token-accurate tokenization, weighted fair
-  queuing, and a multi-replica gateway with shared prefix state.
+- **Weighted fair queuing** wired as a live dispatch gate — **done ✓**
+  ([`gateway/fairsched.py`](gateway/fairsched.py)): admitted requests share a
+  bounded concurrency pool released in start-time-fair-queuing order by tier, so a
+  greedy tenant can't starve premium SLOs under contention (`GW_WFQ_ENABLED`).
+- Remaining product hardening (depth, not breadth): wire the **autoscaler** to a
+  Kubernetes HPA/operator (today advisory), perform a **real KV transfer** for
+  disaggregation (today a routing decision), and ship a **trained TTFT model**
+  (today scaffolding + blend hook).
 
 Built in Python (FastAPI · httpx · OpenTelemetry · Prometheus · Grafana · Docker).

@@ -119,6 +119,19 @@ class Config:
     max_output_tokens: int = 4096           # cap on the output reservation
     chars_per_token: int = 4                # prompt token estimate for quota accounting
 
+    # --- Weighted fair queuing (cross-tenant dispatch fairness) ---
+    # When True, admitted requests share a bounded pool of concurrent dispatch
+    # slots; when all slots are busy, waiting requests are released in weighted-
+    # fair order (start-time fair queuing) by tenant tier, so a greedy low tier
+    # can't starve a premium tier's throughput under contention. Below the
+    # concurrency limit it's a no-op (immediate dispatch), so the benchmarked hot
+    # path is unchanged unless the fleet is actually saturated. Default OFF.
+    wfq_enabled: bool = False
+    wfq_max_concurrency: int = 64           # total simultaneous in-flight dispatches
+    wfq_weights: str = "gold=3,silver=2,bronze=1,anonymous=1"
+    wfq_default_weight: float = 1.0         # weight for tiers not named above
+    wfq_cost: float = 1.0                   # work units charged per request (uniform)
+
     # --- Observability ---
     log_level: str = "INFO"
     # Per-route SLO: when > 0, requests whose TTFT exceeds this (ms) increment
