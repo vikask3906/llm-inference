@@ -1,6 +1,6 @@
 # Prefix-Aware LLM Inference Gateway
 
-[![CI](https://github.com/vikask3906/llm-inferance/actions/workflows/ci.yml/badge.svg)](https://github.com/vikask3906/llm-inferance/actions/workflows/ci.yml)
+[![CI](https://github.com/vikask3906/llm-inference/actions/workflows/ci.yml/badge.svg)](https://github.com/vikask3906/llm-inference/actions/workflows/ci.yml)
 
 An OpenAI-compatible inference gateway that routes requests to the GPU **already
 holding the matching KV-cache prefix** — balanced against per-node saturation —
@@ -266,17 +266,24 @@ gateway/           data plane + control plane
   radix_tree.py       path-compressed prefix tree + LRU eviction
   hashing.py          chained block hashing (mirrors vLLM APC)
   circuit.py          per-backend circuit breaker
+  load_tracker.py     real-time in-flight + EWMA-reconciled KV usage
+  auth.py             API-key auth (constant-time, pre-hashed keys)
   tenancy.py          token buckets + tenant registry + rate limiter
+  fairqueue.py        weighted fair queuing primitive (SFQ)
+  fairsched.py        live async dispatch gate wrapping the WFQ
+  session_affinity.py agentic / multi-turn session-to-backend pinning
   metrics.py          Prometheus exposition
   tracing.py          OpenTelemetry spans
   logging_setup.py    structured JSON logs
+  cluster/            multi-replica state sharing (bus, CRDTs, anti-entropy)
   rag/                RAG structuring + chunk-affinity routing
   admission/          SLO-aware admission control + load shedding
   disagg/             disaggregated prefill/decode routing
   multimodal/         multi-modal capability + affinity routing
   dag/                cache-locality-aware DAG scheduler
   autoscale/          SLO-driven autoscaler / capacity planner
-  extensions/         LoRA, semantic cache, speculative, TTFT predictor
+  extensions/         LoRA, semantic cache, speculative, TTFT predictor, BPE
+rust/              full-parity Rust hot-path port (Tokio + axum)
 mock_backend/      fake vLLM (prefix cache sim + SSE + /health + /metrics)
 bench/             sim, e2e, fairness, load test, benchmark matrix
 scripts/           demo orchestrator + standalone package demos
@@ -304,8 +311,7 @@ is the file-by-file account.
   **done ✓** ([`gateway/cluster/`](gateway/cluster/), `docker-compose.cluster.yml`):
   pluggable transport — Redis pub/sub **or** broker-less peer-to-peer HTTP
   gossip with **LWW anti-entropy** — and durable drain (snapshot warm-start on
-  Redis, digest convergence on gossip). Next: token-accurate per-route SLO
-  tracking and a multi-replica architecture-diagram refresh in the design doc.
+  Redis, digest convergence on gossip).
 - **Rust** hot-path rewrite ([`rust/`](rust/)): full-parity data plane —
   routing + radix tree + metrics + circuit + failover + tenancy + structured
   logging + **SLO-aware admission** — done ✓ (53 tests; ~52× throughput / ~33×
@@ -319,4 +325,5 @@ is the file-by-file account.
   disaggregation (today a routing decision), and ship a **trained TTFT model**
   (today scaffolding + blend hook).
 
-Built in Python (FastAPI · httpx · OpenTelemetry · Prometheus · Grafana · Docker).
+Built in **Python** (FastAPI · httpx · OpenTelemetry · Prometheus · Grafana ·
+Docker) with a full-parity **Rust** hot-path port (Tokio · axum · reqwest).
